@@ -49,6 +49,27 @@ const model = await createModel({
 
 Connection attempts, successes, failures (table not found) and errors are logged with the client, host, port, database and table (credentials are never logged). The promise rejects on failure or error.
 
+### `model.get(where)`
+
+Async. Returns all rows from the model's table matching every key/value pair in `where` (combined with `AND`). Only the model's `selectableProps` columns are returned, and the query uses the model's `requestTimeout`.
+
+```js
+const rows = await model.get({ email: 'test@example.com' });
+// SELECT id, created_at, updated_at, session, email FROM saved_applications WHERE email = 'test@example.com'
+
+const all = await model.get(); // no criteria returns every row
+
+try {
+  await model.get({ email: 'test@example.com', session_id: null }); // null becomes IS NULL
+} catch (error) {
+  // timeouts, DB errors and invalid input reject with an Error; the model remains usable
+}
+```
+
+- The query is built with the knex query builder (no raw SQL) and values are bound as parameters.
+- `where` must be a plain object. Keys must be valid column names (`[A-Za-z_][A-Za-z0-9_]*`) and values must be a string, finite number, boolean, valid `Date` or `null`. Anything else rejects with a `TypeError` before the DB is queried.
+- DB errors are logged with the table and the filtered column names (never the filter values), then rethrown to the caller.
+
 ## Logger
 
 A factory that returns a configured [winston](https://github.com/winstonjs/winston) logger, used for CRUD operations and DB connection logging.
