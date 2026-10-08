@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 import sinon from 'sinon';
 import knex from 'knex';
-import createModel, { DEFAULT_SELECTABLE_PROPS, defineSelectableProps } from '../../../lib/model.js';
+import createModel, { DEFAULT_SELECTABLE_PROPS, defineSelectableProps, validateWhere } from '../../../lib/model.js';
 import loggerFactory from '../../../lib/logger.js';
 
 const knexConfig = {
@@ -145,6 +145,104 @@ describe('createModel', () => {
     });
   });
 
+  describe('get', () => {
+    const rows = [{ id: 1, email: 'test@example.com' }];
+    let instance;
+    let run;
+    let builder;
+
+    // Captures the built query and stubs only its execution.
+    const createGetModel = async (options = {}, { runError } = {}) => {
+      ({ instance } = stubbedKnex());
+      run = runError ? sinon.stub().rejects(runError) : sinon.stub().resolves(rows);
+      sinon.stub(instance.client, 'runner').callsFake(query => {
+        builder = query;
+        return { run };
+      });
+      return createModel({ knex: instance, knexConfig, tableName: 'apps', logger, ...options });
+    };
+
+    it('selects the selectable props from the table matching the where object', async () => {
+      const model = await createGetModel({ selectableProps: ['email'] });
+      const result = await model.get({ email: 'test@example.com' });
+      const { sql, bindings } = builder.toSQL();
+
+      expect(result).to.deep.equal(rows);
+      expect(sql).to.equal('select "id", "created_at", "updated_at", "email" from "apps" where "email" = ?');
+      expect(bindings).to.deep.equal(['test@example.com']);
+    });
+
+    it('combines multiple criteria and handles nulls', async () => {
+      const model = await createGetModel();
+      await model.get({ email: 'test@example.com', id: 1, deleted_at: null });
+      const { sql, bindings } = builder.toSQL();
+
+      expect(sql).to.equal(
+        'select "id", "created_at", "updated_at" from "apps" where "email" = ? and "id" = ? and "deleted_at" is null'
+      );
+      expect(bindings).to.deep.equal(['test@example.com', 1]);
+    });
+
+    it('returns all rows when no criteria are given', async () => {
+      const model = await createGetModel();
+      await model.get();
+
+      expect(builder.toSQL().sql).to.equal('select "id", "created_at", "updated_at" from "apps"');
+    });
+
+    it('binds values as parameters rather than inlining them', async () => {
+      const model = await createGetModel();
+      const malicious = "x' OR '1'='1";
+      await model.get({ email: malicious });
+      const { sql, bindings } = builder.toSQL();
+
+      expect(sql).to.not.include(malicious);
+      expect(bindings).to.deep.equal([malicious]);
+    });
+
+    it('uses the request timeout', async () => {
+      const model = await createGetModel({ requestTimeout: 1234 });
+      await model.get({ id: 1 });
+
+      expect(builder.toSQL().timeout).to.equal(1234);
+    });
+
+    it('does not mutate the where object', async () => {
+      const model = await createGetModel();
+      const where = { id: 1 };
+      await model.get(where);
+
+      expect(where).to.deep.equal({ id: 1 });
+    });
+
+    it('logs and rethrows query errors without logging filter values', async () => {
+      const model = await createGetModel({}, { runError: new Error('query timed out') });
+      const error = await rejectionOf(model.get({ email: 'test@example.com' }));
+
+      expect(error.message).to.equal('query timed out');
+      expect(logger.error).to.have.been.calledOnceWithExactly(
+        'DB read error', { table: 'apps', columns: ['email'], error: 'query timed out' }
+      );
+    });
+
+    it('continues to work after an error', async () => {
+      const model = await createGetModel();
+      run.onFirstCall().rejects(new Error('boom'));
+
+      await rejectionOf(model.get({ id: 1 }));
+      expect(await model.get({ id: 1 })).to.deep.equal(rows);
+    });
+
+    it('rejects invalid input without querying the DB', async () => {
+      const model = await createGetModel();
+
+      for (const where of [null, 'id = 1', [], { 'id; drop table apps': 1 }, { email: { $ne: '' } }]) {
+        expect(await rejectionOf(model.get(where))).to.be.instanceOf(TypeError);
+      }
+      expect(run).to.not.have.been.called;
+    });
+  });
+
   describe('validation', () => {
     it('requires a knex connection, knex config and table name', async () => {
       const instance = knex(knexConfig);
@@ -154,6 +252,40 @@ describe('createModel', () => {
       expect(await rejectionOf(createModel({ knex: instance, tableName: 'apps' }))).to.be.instanceOf(TypeError);
       expect(await rejectionOf(createModel({ knex: instance, knexConfig }))).to.be.instanceOf(TypeError);
     });
+  });
+});
+
+describe('validateWhere', () => {
+  it('returns a copy of a valid where object', () => {
+    const date = new Date();
+    const where = { email: 'test@example.com', id: 1, active: true, deleted_at: null, created_at: date };
+    const result = validateWhere(where);
+
+    expect(result).to.deep.equal(where);
+    expect(result).to.not.equal(where);
+  });
+
+  it('accepts objects parsed from JSON and with a null prototype', () => {
+    expect(validateWhere(JSON.parse('{"id":1}'))).to.deep.equal({ id: 1 });
+    expect(validateWhere(Object.assign(Object.create(null), { id: 1 }))).to.deep.equal({ id: 1 });
+  });
+
+  it('rejects non plain objects', () => {
+    for (const where of [undefined, null, 'id', 1, [], new Date(), new Map()]) {
+      expect(() => validateWhere(where)).to.throw(TypeError, 'where must be a plain object');
+    }
+  });
+
+  it('rejects invalid column names', () => {
+    for (const column of ['', '1id', 'id;', 'id = 1', 'a.b', '"id"', 'id--']) {
+      expect(() => validateWhere({ [column]: 1 })).to.throw(TypeError, 'Invalid column name');
+    }
+  });
+
+  it('rejects unsupported values', () => {
+    for (const value of [undefined, {}, [1], () => {}, NaN, Infinity, new Date('x'), Symbol('s'), 1n]) {
+      expect(() => validateWhere({ id: value })).to.throw(TypeError, 'Invalid value for column "id"');
+    }
   });
 });
 
