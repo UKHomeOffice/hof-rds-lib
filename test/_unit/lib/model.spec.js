@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 import sinon from 'sinon';
 import knex from 'knex';
-import createModel, { DEFAULT_SELECTABLE_PROPS, defineSelectableProps, validateWhere } from '../../../lib/model.js';
+import createModel, { DEFAULT_SELECTABLE_PROPS, defineSelectableProps, validateColumnValues } from '../../../lib/model.js';
 import loggerFactory from '../../../lib/logger.js';
 
 const knexConfig = {
@@ -243,6 +243,10 @@ describe('createModel', () => {
     });
   });
 
+  describe('create', () => {
+    // TODO: add tests for the create method
+  });
+
   describe('validation', () => {
     it('requires a knex connection, knex config and table name', async () => {
       const instance = knex(knexConfig);
@@ -255,37 +259,40 @@ describe('createModel', () => {
   });
 });
 
-describe('validateWhere', () => {
+describe('validateColumnValues', () => {
   it('returns a copy of a valid where object', () => {
     const date = new Date();
     const where = { email: 'test@example.com', id: 1, active: true, deleted_at: null, created_at: date };
-    const result = validateWhere(where);
+    const result = validateColumnValues(where);
 
     expect(result).to.deep.equal(where);
     expect(result).to.not.equal(where);
   });
 
   it('accepts objects parsed from JSON and with a null prototype', () => {
-    expect(validateWhere(JSON.parse('{"id":1}'))).to.deep.equal({ id: 1 });
-    expect(validateWhere(Object.assign(Object.create(null), { id: 1 }))).to.deep.equal({ id: 1 });
+    expect(validateColumnValues(JSON.parse('{"id":1}'))).to.deep.equal({ id: 1 });
+    expect(validateColumnValues(Object.assign(Object.create(null), { id: 1 }))).to.deep.equal({ id: 1 });
   });
 
   it('rejects non plain objects', () => {
     for (const where of [undefined, null, 'id', 1, [], new Date(), new Map()]) {
-      expect(() => validateWhere(where)).to.throw(TypeError, 'where must be a plain object');
+      expect(() => validateColumnValues(where)).to.throw(TypeError, 'input must be a plain object');
     }
   });
 
   it('rejects invalid column names', () => {
     for (const column of ['', '1id', 'id;', 'id = 1', 'a.b', '"id"', 'id--']) {
-      expect(() => validateWhere({ [column]: 1 })).to.throw(TypeError, 'Invalid column name');
+      expect(() => validateColumnValues({ [column]: 1 })).to.throw(TypeError, 'Invalid column name');
     }
   });
 
   it('rejects unsupported values', () => {
-    for (const value of [undefined, {}, [1], () => {}, NaN, Infinity, new Date('x'), Symbol('s'), 1n]) {
-      expect(() => validateWhere({ id: value })).to.throw(TypeError, 'Invalid value for column "id"');
+    for (const value of [undefined, {}, [1], () => { }, NaN, Infinity, new Date('x'), Symbol('s'), 1n]) {
+      expect(() => validateColumnValues({ id: value })).to.throw(TypeError, 'Invalid value for column "id"');
     }
+  });
+  it('rejects empty objects when requireNonEmpty is true', () => {
+    expect(() => validateColumnValues({}, true)).to.throw(TypeError, 'input must contain at least one column');
   });
 });
 
