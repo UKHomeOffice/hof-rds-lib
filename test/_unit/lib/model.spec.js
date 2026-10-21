@@ -1,7 +1,11 @@
 import { expect } from 'chai';
 import sinon from 'sinon';
 import knex from 'knex';
-import createModel, { DEFAULT_SELECTABLE_PROPS, defineSelectableProps, validateColumnValues } from '../../../lib/model.js';
+import createModel, {
+  DEFAULT_SELECTABLE_PROPS,
+  defineSelectableProps,
+  validateColumnValues
+} from '../../../lib/model.js';
 import loggerFactory from '../../../lib/logger.js';
 
 const knexConfig = {
@@ -244,7 +248,62 @@ describe('createModel', () => {
   });
 
   describe('create', () => {
-    // TODO: add tests for the create method
+    const rows = [{ id: 1, email: 'test@example.com' }];
+    let instance;
+    let run;
+    let builder;
+
+    const createModelForInsert = async (options = {}, { runError } = {}) => {
+      ({ instance } = stubbedKnex());
+      run = runError ? sinon.stub().rejects(runError) : sinon.stub().resolves(rows);
+      sinon.stub(instance.client, 'runner').callsFake(query => {
+        builder = query;
+        return { run };
+      });
+      return createModel({ knex: instance, knexConfig, tableName: 'apps', logger, ...options });
+    };
+
+    it('inserts the data and returns the selectable props', async () => {
+      const model = await createModelForInsert({ selectableProps: ['email'] });
+      const data = { email: 'test@example.com' };
+      const result = await model.create(data);
+      const { sql, bindings } = builder.toSQL();
+
+      expect(result).to.deep.equal(rows);
+      expect(sql).to.equal(
+        'insert into "apps" ("email") values (?) returning "id", "created_at", "updated_at", "email"'
+      );
+      expect(bindings).to.deep.equal(['test@example.com']);
+      expect(data).to.deep.equal({ email: 'test@example.com' });
+    });
+
+    it('uses the request timeout', async () => {
+      const model = await createModelForInsert({ requestTimeout: 1234 });
+      await model.create({ email: 'test@example.com' });
+
+      expect(builder.toSQL().timeout).to.equal(1234);
+    });
+
+    it('logs and rethrows query errors without logging inserted values', async () => {
+      const model = await createModelForInsert({}, { runError: new Error('insert failed') });
+      const error = await rejectionOf(model.create({ email: 'sensitive@example.com' }));
+
+      expect(error.message).to.equal('insert failed');
+      expect(logger.error).to.have.been.calledOnceWithExactly(
+        'DB create error', { table: 'apps', columns: ['email'], error: 'insert failed' }
+      );
+      expect(logger.error.firstCall.args[1]).to.not.have.property('email');
+    });
+
+    it('rejects invalid or empty data without querying the DB', async () => {
+      const model = await createModelForInsert();
+
+      for (const data of [{}, null, 'email', { 'email; drop table apps': 'x' }, { email: { $ne: '' } }]) {
+        expect(await rejectionOf(model.create(data))).to.be.instanceOf(TypeError);
+      }
+      expect(run).to.not.have.been.called;
+      expect(logger.error).to.not.have.been.called;
+    });
   });
 
   describe('validation', () => {
