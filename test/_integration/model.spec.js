@@ -77,6 +77,27 @@ describe('createModel with a real knex connection', () => {
       throw new Error(`Timed out waiting for MiniStack RDS instance: ${dbInstanceIdentifier}`);
     };
 
+    const waitForPostgresConnection = async () => {
+      const deadline = Date.now() + 30000;
+      let lastError;
+
+      while (Date.now() < deadline) {
+        try {
+          await setup.raw('select 1');
+          return;
+        } catch (error) {
+          lastError = error;
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
+
+      throw new Error(
+        `PostgreSQL endpoint ${dbConfig.connection.host}:${dbConfig.connection.port} ` +
+        `did not become ready: ${lastError?.message || 'connection failed'}`,
+        { cause: lastError }
+      );
+    };
+
     before(async function () {
       this.timeout(120000);
       ministack = await new GenericContainer('ministackorg/ministack:1.5.30')
@@ -125,10 +146,12 @@ describe('createModel with a real knex connection', () => {
           port: endpoint.Port,
           user: 'hof_user',
           password: 'hof-rds-lib-test-password',
-          database: dbName
+          database: dbName,
+          connectionTimeoutMillis: 5000
         }
       };
       setup = knex(dbConfig);
+      await waitForPostgresConnection();
       await setup.schema.createTable(tableName, table => {
         table.increments('id');
         table.timestamps(true, true);
