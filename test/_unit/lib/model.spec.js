@@ -1,7 +1,11 @@
 import { expect } from 'chai';
 import sinon from 'sinon';
 import knex from 'knex';
-import createModel, { DEFAULT_SELECTABLE_PROPS, defineSelectableProps, validateWhere } from '../../../lib/model.js';
+import createModel, {
+  DEFAULT_SELECTABLE_PROPS,
+  defineSelectableProps,
+  validateColumnValues
+} from '../../../lib/model.js';
 import loggerFactory from '../../../lib/logger.js';
 
 const knexConfig = {
@@ -243,6 +247,66 @@ describe('createModel', () => {
     });
   });
 
+  describe('create', () => {
+    const rows = [{ id: 1, email: 'test@example.com' }];
+    let instance;
+    let run;
+    let builder;
+
+    const createModelForInsert = async (options = {}, { runError } = {}) => {
+      ({ instance } = stubbedKnex());
+      run = runError ? sinon.stub().rejects(runError) : sinon.stub().resolves(rows);
+      sinon.stub(instance.client, 'runner').callsFake(query => {
+        builder = query;
+        return { run };
+      });
+      return createModel({ knex: instance, knexConfig, tableName: 'apps', logger, ...options });
+    };
+
+    it('inserts the data and returns the selectable props', async () => {
+      const model = await createModelForInsert({ selectableProps: ['email'] });
+      const data = { email: 'test@example.com' };
+      const result = await model.create(data);
+      const { sql, bindings } = builder.toSQL();
+
+      expect(result).to.deep.equal(rows);
+      expect(sql).to.equal(
+        'insert into "apps" ("email") values (?) returning "id", "created_at", "updated_at", "email"'
+      );
+      expect(bindings).to.deep.equal(['test@example.com']);
+      expect(data).to.deep.equal({ email: 'test@example.com' });
+    });
+
+    it('uses the request timeout', async () => {
+      const model = await createModelForInsert({ requestTimeout: 1234 });
+      await model.create({ email: 'test@example.com' });
+
+      expect(builder.toSQL().timeout).to.equal(1234);
+    });
+
+    it('logs and rethrows query errors without logging inserted values', async () => {
+      const runError = Object.assign(new Error('insert failed'), { code: '23505' });
+      const model = await createModelForInsert({}, { runError });
+      const error = await rejectionOf(model.create({ email: 'sensitive@example.com' }));
+
+      expect(error.message).to.equal('insert failed');
+      expect(logger.error).to.have.been.calledOnceWithExactly(
+        'DB create error', { table: 'apps', columns: ['email'], code: '23505' }
+      );
+      expect(logger.error.firstCall.args[1]).to.not.have.property('email');
+    });
+
+    it('rejects invalid or empty data without querying the DB', async () => {
+      const model = await createModelForInsert();
+
+      for (const data of [{}, null, 'email', { 'email; drop table apps': 'x' }, { email: { $ne: '' } }]) {
+        expect(await rejectionOf(model.create(data))).to.be.instanceOf(TypeError);
+      }
+      expect(run).to.not.have.been.called;
+      expect(logger.error).to.not.have.been.called;
+    });
+  });
+
   describe('validation', () => {
     it('requires a knex connection, knex config and table name', async () => {
       const instance = knex(knexConfig);
@@ -255,37 +319,40 @@ describe('createModel', () => {
   });
 });
 
-describe('validateWhere', () => {
+describe('validateColumnValues', () => {
   it('returns a copy of a valid where object', () => {
     const date = new Date();
     const where = { email: 'test@example.com', id: 1, active: true, deleted_at: null, created_at: date };
-    const result = validateWhere(where);
+    const result = validateColumnValues(where);
 
     expect(result).to.deep.equal(where);
     expect(result).to.not.equal(where);
   });
 
   it('accepts objects parsed from JSON and with a null prototype', () => {
-    expect(validateWhere(JSON.parse('{"id":1}'))).to.deep.equal({ id: 1 });
-    expect(validateWhere(Object.assign(Object.create(null), { id: 1 }))).to.deep.equal({ id: 1 });
+    expect(validateColumnValues(JSON.parse('{"id":1}'))).to.deep.equal({ id: 1 });
+    expect(validateColumnValues(Object.assign(Object.create(null), { id: 1 }))).to.deep.equal({ id: 1 });
   });
 
   it('rejects non plain objects', () => {
     for (const where of [undefined, null, 'id', 1, [], new Date(), new Map()]) {
-      expect(() => validateWhere(where)).to.throw(TypeError, 'where must be a plain object');
+      expect(() => validateColumnValues(where)).to.throw(TypeError, 'input must be a plain object');
     }
   });
 
   it('rejects invalid column names', () => {
     for (const column of ['', '1id', 'id;', 'id = 1', 'a.b', '"id"', 'id--']) {
-      expect(() => validateWhere({ [column]: 1 })).to.throw(TypeError, 'Invalid column name');
+      expect(() => validateColumnValues({ [column]: 1 })).to.throw(TypeError, 'Invalid column name');
     }
   });
 
   it('rejects unsupported values', () => {
-    for (const value of [undefined, {}, [1], () => {}, NaN, Infinity, new Date('x'), Symbol('s'), 1n]) {
-      expect(() => validateWhere({ id: value })).to.throw(TypeError, 'Invalid value for column "id"');
+    for (const value of [undefined, {}, [1], () => { }, NaN, Infinity, new Date('x'), Symbol('s'), 1n]) {
+      expect(() => validateColumnValues({ id: value })).to.throw(TypeError, 'Invalid value for column "id"');
     }
+  });
+  it('rejects empty objects when requireNonEmpty is true', () => {
+    expect(() => validateColumnValues({}, true)).to.throw(TypeError, 'input must contain at least one column');
   });
 });
 
