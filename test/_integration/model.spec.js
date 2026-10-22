@@ -1,6 +1,7 @@
 import { expect } from 'chai';
 import sinon from 'sinon';
 import knex from 'knex';
+import { createServer } from 'node:net';
 import {
   CreateDBInstanceCommand,
   DeleteDBInstanceCommand,
@@ -50,11 +51,34 @@ describe('createModel with a real knex connection', () => {
     let rds;
     let dbConfig;
     const tableName = 'hof_rds_lib_test';
-    const dbInstanceIdentifier = 'hof-rds-lib-instance';
+    const dbInstanceIdentifier = `hof-rds-lib-instance-${process.pid}-${Date.now()}`;
     const dbName = 'hof_rds_lib_test';
     let dbInstanceCreated = false;
     let setup;
 
+    // Reserve a Docker-host port for MiniStack's nested PostgreSQL container.
+    const reserveHostPort = async () => {
+      const server = createServer();
+      await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '0.0.0.0', resolve);
+      });
+
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        await new Promise(resolve => server.close(resolve));
+        throw new Error('Could not reserve a Docker-host port for MiniStack RDS');
+      }
+
+      return {
+        port: address.port,
+        release: () => new Promise((resolve, reject) => {
+          server.close(error => error ? reject(error) : resolve());
+        })
+      };
+    };
+
+    // Poll the RDS API until the instance reports that provisioning is complete.
     const waitForDatabaseInstance = async () => {
       const deadline = Date.now() + 90000;
 
@@ -77,6 +101,7 @@ describe('createModel with a real knex connection', () => {
       throw new Error(`Timed out waiting for MiniStack RDS instance: ${dbInstanceIdentifier}`);
     };
 
+    // Verify SQL connectivity after the RDS API reports the instance as available.
     const waitForPostgresConnection = async () => {
       const deadline = Date.now() + 30000;
       let lastError;
@@ -100,20 +125,25 @@ describe('createModel with a real knex connection', () => {
 
     before(async function () {
       this.timeout(120000);
-      ministack = await new GenericContainer('ministackorg/ministack:1.5.30')
-        .withExposedPorts(4566)
-        .withBindMounts([{
-          source: '/var/run/docker.sock',
-          target: '/var/run/docker.sock'
-        }])
-        .withEnvironment({
-          MINISTACK_HOST: 'localhost',
-          MINISTACK_RDS_PUBLIC_ENDPOINT: '1',
-          RDS_BASE_PORT: '15432'
-        })
-        .withWaitStrategy(Wait.forHttp('/_ministack/health', 4566))
-        .withStartupTimeout(120000)
-        .start();
+      const rdsPortReservation = await reserveHostPort();
+      try {
+        ministack = await new GenericContainer('ministackorg/ministack:1.5.30')
+          .withExposedPorts(4566)
+          .withBindMounts([{
+            source: '/var/run/docker.sock',
+            target: '/var/run/docker.sock'
+          }])
+          .withEnvironment({
+            MINISTACK_HOST: 'localhost',
+            MINISTACK_RDS_PUBLIC_ENDPOINT: '1',
+            RDS_BASE_PORT: String(rdsPortReservation.port)
+          })
+          .withWaitStrategy(Wait.forHttp('/_ministack/health', 4566))
+          .withStartupTimeout(120000)
+          .start();
+      } finally {
+        await rdsPortReservation.release();
+      }
       const miniStackEndpoint = `http://${ministack.getHost()}:${ministack.getMappedPort(4566)}`;
       rds = new RDSClient({
         endpoint: miniStackEndpoint,

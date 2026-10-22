@@ -285,12 +285,13 @@ describe('createModel', () => {
     });
 
     it('logs and rethrows query errors without logging inserted values', async () => {
-      const model = await createModelForInsert({}, { runError: new Error('insert failed') });
+      const runError = Object.assign(new Error('insert failed'), { code: '23505' });
+      const model = await createModelForInsert({}, { runError });
       const error = await rejectionOf(model.create({ email: 'sensitive@example.com' }));
 
       expect(error.message).to.equal('insert failed');
       expect(logger.error).to.have.been.calledOnceWithExactly(
-        'DB create error', { table: 'apps', columns: ['email'], error: 'insert failed' }
+        'DB create error', { table: 'apps', columns: ['email'], code: '23505' }
       );
       expect(logger.error.firstCall.args[1]).to.not.have.property('email');
     });
