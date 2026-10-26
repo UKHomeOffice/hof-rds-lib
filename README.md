@@ -122,8 +122,10 @@ yarn test:unit         # test/_unit, with coverage
 yarn test:integration  # test/_integration, with coverage
 ```
 
-Integration tests that need a database are skipped unless `DB_NAME` is set. They also read `DB_HOST`, `DB_PORT`, `DB_USER` and `DB_PASS`, and create and drop a temporary table:
+Integration tests start MiniStack automatically with Testcontainers, use its RDS API to provision a real PostgreSQL instance, then connect to its returned endpoint with Knex. Docker must be running, with access to `/var/run/docker.sock` so MiniStack can start the RDS database container. Run:
 
 ```bash
-DB_NAME=postgres DB_USER=$(whoami) yarn test:integration
+yarn test:integration
 ```
+
+The tests create and delete their own RDS instance.
