@@ -1,4 +1,4 @@
-FROM quay.io/ukhomeofficedigital/hof-nodejs:24.21.0-alpine3.24-v4@sha256:c5d1333e7e965464258596faf4ac16a0eadd36029270ed0d8d94ec9003cae19d
+FROM quay.io/ukhomeofficedigital/hof-nodejs:24.22.0-alpine3.24-v3@sha256:d3cbb9169fabac2cdf2a640df03d15560696c43d77e3483011b74255502b913a
 USER root
 
 # Setup nodejs group & nodejs user

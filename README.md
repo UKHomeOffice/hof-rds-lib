@@ -4,7 +4,7 @@ RDS integration library replacing the hof-rds-api sidecar.
 
 ## Requirements
 
-- Node.js `>=24.21.0 <25.0.0`
+- Node.js
 
 ## Install
 
@@ -89,6 +89,29 @@ try {
 - `id` must be a string or finite number. `fields` is validated like `create` data: a non-empty plain object with valid column names and supported values (string, finite number, boolean, valid `Date` or `null`). Anything else rejects with a `TypeError` before the DB is queried.
 - `updated_at` is always set by the database and overrides any supplied value.
 - DB errors are logged with the table and the column names (never the values), then rethrown to the caller.
+
+### `model.delete(id)`
+
+Async. Deletes the row with the given `id` from the model's table and resolves with the number of rows deleted (`0` if no row matched). The query uses the model's `requestTimeout`.
+
+```js
+const deleted = await model.delete(1);
+// DELETE FROM saved_applications WHERE id = 1
+
+if (deleted === 0) {
+  // no row with that id
+}
+
+try {
+  await model.delete(1);
+} catch (error) {
+  // timeouts, DB errors and invalid input reject with an Error; the model remains usable
+}
+```
+
+- The query is built with the knex query builder (no raw SQL) and the id is bound as a parameter.
+- `id` must be a positive integer or a non-empty string. Anything else rejects with a `TypeError` before the DB is queried.
+- DB errors are logged with the table and error code (never the id or error message), then rethrown to the caller.
 
 ## Logger
 

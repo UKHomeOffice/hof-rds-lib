@@ -400,6 +400,86 @@ describe('createModel', () => {
     });
   });
 
+  describe('delete', () => {
+    let instance;
+    let run;
+    let builder;
+
+    const createModelForDelete = async (options = {}, { runError } = {}) => {
+      ({ instance } = stubbedKnex());
+      run = runError ? sinon.stub().rejects(runError) : sinon.stub().resolves(1);
+      sinon.stub(instance.client, 'runner').callsFake(query => {
+        builder = query;
+        return { run };
+      });
+      return createModel({ knex: instance, knexConfig, tableName: 'apps', logger, ...options });
+    };
+
+    it('deletes the row with the given id and returns the deleted count', async () => {
+      const model = await createModelForDelete();
+      const result = await model.delete(1);
+      const { sql, bindings } = builder.toSQL();
+
+      expect(result).to.equal(1);
+      expect(sql).to.equal('delete from "apps" where "id" = ?');
+      expect(bindings).to.deep.equal([1]);
+    });
+
+    it('accepts string ids and binds them as parameters', async () => {
+      const model = await createModelForDelete();
+      const malicious = "1' OR '1'='1";
+      await model.delete(malicious);
+      const { sql, bindings } = builder.toSQL();
+
+      expect(sql).to.equal('delete from "apps" where "id" = ?');
+      expect(bindings).to.deep.equal([malicious]);
+    });
+
+    it('returns 0 when no row matches', async () => {
+      const model = await createModelForDelete();
+      run.resolves(0);
+
+      expect(await model.delete(999)).to.equal(0);
+    });
+
+    it('uses the request timeout', async () => {
+      const model = await createModelForDelete({ requestTimeout: 1234 });
+      await model.delete(1);
+
+      expect(builder.toSQL().timeout).to.equal(1234);
+    });
+
+    it('logs and rethrows query errors with the error code only', async () => {
+      // 57014 is PostgreSQL's query_canceled code, which is what a statement timeout raises.
+      const runError = Object.assign(new Error('query timed out'), { code: '57014' });
+      const model = await createModelForDelete({}, { runError });
+      const error = await rejectionOf(model.delete(1));
+
+      expect(error).to.equal(runError);
+      expect(logger.error).to.have.been.calledOnceWithExactly(
+        'DB delete error', { table: 'apps', code: '57014' }
+      );
+    });
+
+    it('continues to work after an error', async () => {
+      const model = await createModelForDelete();
+      run.onFirstCall().rejects(new Error('boom'));
+
+      await rejectionOf(model.delete(1));
+      expect(await model.delete(1)).to.equal(1);
+    });
+
+    it('rejects invalid ids without querying the DB', async () => {
+      const model = await createModelForDelete();
+
+      for (const id of [undefined, null, 0, -1, 1.5, NaN, Infinity, '', '  ', {}, [], { id: 1 }, true]) {
+        expect(await rejectionOf(model.delete(id))).to.be.instanceOf(TypeError);
+      }
+      expect(run).to.not.have.been.called;
+      expect(logger.error).to.not.have.been.called;
+    });
+  });
+
   describe('validation', () => {
     it('requires a knex connection, knex config and table name', async () => {
       const instance = knex(knexConfig);

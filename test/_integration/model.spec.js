@@ -31,8 +31,17 @@ describe('createModel with a real knex connection', () => {
     await Promise.all(instances.map(instance => instance.destroy()));
   });
 
-  it('logs an error when the DB cannot be reached', async () => {
-    const knexConfig = { client: 'pg', connection: { host: '127.0.0.1', port: 1, database: 'unreachable' } };
+  it('logs an error when the DB cannot be reached (expected ECONNREFUSED warning)', async () => {
+    // A non-test env so the warning is printed; kept separate from the spied model logger.
+    const expectedWarnings = loggerFactory({ env: 'local', label: 'expected test warning' });
+    const knexConfig = {
+      client: 'pg',
+      connection: { host: '127.0.0.1', port: 1, database: 'unreachable' },
+      // knex warns about the deliberately failed connection; label it so it isn't mistaken for a failure.
+      log: {
+        warn: message => expectedWarnings.warn(String(message).split('\n')[0])
+      }
+    };
 
     const error = await rejectionOf(
       createModel({ knex, knexConfig, tableName: 'apps', requestTimeout: 2000, logger })
@@ -240,6 +249,42 @@ describe('createModel with a real knex connection', () => {
 
       expect(await model.get({ email: null })).to.deep.equal([created]);
       expect(await model.get({ email: 'missing@example.com' })).to.deep.equal([]);
+    });
+
+    it('deletes only the row with the given id', async () => {
+      const model = await createModel({ knex, knexConfig: dbConfig, tableName, selectableProps: ['email'], logger });
+      instances.push(model.knex);
+
+      const [toDelete] = await model.create({ email: 'delete-me@example.com' });
+      const [toKeep] = await model.create({ email: 'keep-me@example.com' });
+
+      expect(await model.delete(toDelete.id)).to.equal(1);
+      expect(await model.get({ id: toDelete.id })).to.deep.equal([]);
+      expect(await model.get({ id: toKeep.id })).to.deep.equal([toKeep]);
+    });
+
+    it('returns 0 when deleting an id that does not exist', async () => {
+      const model = await createModel({ knex, knexConfig: dbConfig, tableName, logger });
+      instances.push(model.knex);
+
+      expect(await model.delete(2147483647)).to.equal(0);
+    });
+
+    it('logs and rethrows DB errors on delete and remains usable', async () => {
+      const model = await createModel({ knex, knexConfig: dbConfig, tableName, selectableProps: ['email'], logger });
+      instances.push(model.knex);
+
+      // A non-numeric string passes input validation but is rejected by the integer id column.
+      const error = await rejectionOf(model.delete('not-a-number'));
+
+      expect(error.message).to.match(/invalid input syntax for type integer/);
+      expect(logger.error).to.have.been.calledOnceWith('DB delete error');
+      // 22P02 is PostgreSQL's invalid_text_representation; error.message quotes the id, so only the code is logged.
+      expect(logger.error.firstCall.args[1]).to.deep.equal({ table: tableName, code: '22P02' });
+      expect(JSON.stringify(logger.error.firstCall.args)).to.not.include('not-a-number');
+
+      const [created] = await model.create({ email: 'after-error@example.com' });
+      expect(await model.delete(created.id)).to.equal(1);
     });
 
     it('logs a failure when the table does not exist', async () => {
