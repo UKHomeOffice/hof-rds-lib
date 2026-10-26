@@ -356,13 +356,15 @@ describe('createModel', () => {
       expect(builder.toSQL().timeout).to.equal(1234);
     });
 
-    it('logs and rethrows query errors', async () => {
-      const model = await createModelForDelete({}, { runError: new Error('query timed out') });
+    it('logs and rethrows query errors with the error code only', async () => {
+      // 57014 is PostgreSQL's query_canceled code, which is what a statement timeout raises.
+      const runError = Object.assign(new Error('query timed out'), { code: '57014' });
+      const model = await createModelForDelete({}, { runError });
       const error = await rejectionOf(model.delete(1));
 
-      expect(error.message).to.equal('query timed out');
+      expect(error).to.equal(runError);
       expect(logger.error).to.have.been.calledOnceWithExactly(
-        'DB delete error', { table: 'apps', error: 'query timed out' }
+        'DB delete error', { table: 'apps', code: '57014' }
       );
     });
 

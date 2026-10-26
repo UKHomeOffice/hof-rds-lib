@@ -279,7 +279,9 @@ describe('createModel with a real knex connection', () => {
 
       expect(error.message).to.match(/invalid input syntax for type integer/);
       expect(logger.error).to.have.been.calledOnceWith('DB delete error');
-      expect(logger.error.firstCall.args[1]).to.include({ table: tableName });
+      // 22P02 is PostgreSQL's invalid_text_representation; error.message quotes the id, so only the code is logged.
+      expect(logger.error.firstCall.args[1]).to.deep.equal({ table: tableName, code: '22P02' });
+      expect(JSON.stringify(logger.error.firstCall.args)).to.not.include('not-a-number');
 
       const [created] = await model.create({ email: 'after-error@example.com' });
       expect(await model.delete(created.id)).to.equal(1);
