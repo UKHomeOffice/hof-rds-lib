@@ -302,12 +302,13 @@ describe('createModel', () => {
     });
 
     it('logs and rethrows query errors without logging values', async () => {
-      const model = await createPatchModel({}, { runError: new Error('query timed out') });
+      const runError = Object.assign(new Error('query timed out'), { code: '57014' });
+      const model = await createPatchModel({}, { runError });
       const error = await rejectionOf(model.patch(1, { email: 'a@b.com' }));
 
       expect(error.message).to.equal('query timed out');
       expect(logger.error).to.have.been.calledOnceWithExactly(
-        'DB update error', { table: 'apps', columns: ['email'], error: 'query timed out' }
+        'DB update error', { table: 'apps', columns: ['email'], code: '57014' }
       );
     });
 
