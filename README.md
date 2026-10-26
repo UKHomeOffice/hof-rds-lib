@@ -86,6 +86,7 @@ try {
 ```
 
 - The query is built with the knex query builder (no raw SQL) and values are bound as parameters.
+- `id` must be a string or finite number. `fields` is validated like `create` data: a non-empty plain object with valid column names and supported values (string, finite number, boolean, valid `Date` or `null`). Anything else rejects with a `TypeError` before the DB is queried.
 - `updated_at` is always set by the database and overrides any supplied value.
 - DB errors are logged with the table and the column names (never the values), then rethrown to the caller.
 

@@ -318,6 +318,26 @@ describe('createModel', () => {
       await rejectionOf(model.patch(1, { email: 'a@b.com' }));
       expect(await model.patch(1, { email: 'a@b.com' })).to.deep.equal(rows);
     });
+
+    it('rejects invalid input without querying the DB', async () => {
+      const model = await createPatchModel();
+      const invalid = [
+        [1, {}],
+        [1, null],
+        [1, 'email'],
+        [1, { 'email; drop table apps': 'x' }],
+        [1, { email: { $ne: '' } }],
+        [{ $ne: 1 }, { email: 'a@b.com' }],
+        [undefined, { email: 'a@b.com' }],
+        [NaN, { email: 'a@b.com' }]
+      ];
+
+      for (const [id, fields] of invalid) {
+        expect(await rejectionOf(model.patch(id, fields))).to.be.instanceOf(TypeError);
+      }
+      expect(run).to.not.have.been.called;
+      expect(logger.error).to.not.have.been.called;
+    });
   });
 
   describe('create', () => {
