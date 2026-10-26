@@ -91,7 +91,7 @@ try {
 
 - The query is built with the knex query builder (no raw SQL) and the id is bound as a parameter.
 - `id` must be a positive integer or a non-empty string. Anything else rejects with a `TypeError` before the DB is queried.
-- DB errors are logged with the table and error message (never the id), then rethrown to the caller.
+- DB errors are logged with the table and error code (never the id or error message), then rethrown to the caller.
 
 ## Logger
 
