@@ -70,6 +70,26 @@ try {
 - `where` must be a plain object. Keys must be valid column names (`[A-Za-z_][A-Za-z0-9_]*`) and values must be a string, finite number, boolean, valid `Date` or `null`. Anything else rejects with a `TypeError` before the DB is queried.
 - DB errors are logged with the table and the filtered column names (never the filter values), then rethrown to the caller.
 
+### `model.patch(id, fields)`
+
+Async. Updates the row whose `id` matches, setting each column in `fields` and refreshing `updated_at`. Resolves with an array of the updated rows (only the model's `selectableProps`), which is empty if no row matched. The query uses the model's `requestTimeout`.
+
+```js
+const [updated] = await model.patch(42, { email: 'new@example.com' });
+// UPDATE saved_applications SET email = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING id, created_at, updated_at, session, email
+
+try {
+  await model.patch(42, { email: 'new@example.com' });
+} catch (error) {
+  // timeouts and DB errors reject with an Error; the model remains usable
+}
+```
+
+- The query is built with the knex query builder (no raw SQL) and values are bound as parameters.
+- `id` must be a string or finite number. `fields` is validated like `create` data: a non-empty plain object with valid column names and supported values (string, finite number, boolean, valid `Date` or `null`). Anything else rejects with a `TypeError` before the DB is queried.
+- `updated_at` is always set by the database and overrides any supplied value.
+- DB errors are logged with the table and the column names (never the values), then rethrown to the caller.
+
 ### `model.delete(id)`
 
 Async. Deletes the row with the given `id` from the model's table and resolves with the number of rows deleted (`0` if no row matched). The query uses the model's `requestTimeout`.

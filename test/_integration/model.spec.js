@@ -251,6 +251,55 @@ describe('createModel with a real knex connection', () => {
       expect(await model.get({ email: 'missing@example.com' })).to.deep.equal([]);
     });
 
+    it('patches only the row with the given id and refreshes updated_at', async () => {
+      const model = await createModel({ knex, knexConfig: dbConfig, tableName, selectableProps: ['email'], logger });
+      instances.push(model.knex);
+
+      const [toPatch] = await model.create({ email: 'before@example.com' });
+      const [toKeep] = await model.create({ email: 'untouched@example.com' });
+      const [patched] = await model.patch(toPatch.id, { email: 'after@example.com' });
+
+      expect(patched).to.include({ id: toPatch.id, email: 'after@example.com' });
+      expect(new Date(patched.updated_at).getTime()).to.be.at.least(new Date(toPatch.updated_at).getTime());
+      expect(await model.get({ id: toPatch.id })).to.deep.equal([patched]);
+      expect(await model.get({ id: toKeep.id })).to.deep.equal([toKeep]);
+    });
+
+    it('returns an empty array when patching an id that does not exist', async () => {
+      const model = await createModel({ knex, knexConfig: dbConfig, tableName, logger });
+      instances.push(model.knex);
+
+      expect(await model.patch(2147483647, { email: 'nobody@example.com' })).to.deep.equal([]);
+    });
+
+    it('rejects invalid patch input without logging a DB error', async () => {
+      const model = await createModel({ knex, knexConfig: dbConfig, tableName, logger });
+      instances.push(model.knex);
+
+      expect(await rejectionOf(model.patch(1, {}))).to.be.instanceOf(TypeError);
+      expect(await rejectionOf(model.patch(1, { 'email; drop table x': 'a' }))).to.be.instanceOf(TypeError);
+      expect(await rejectionOf(model.patch({ $ne: 1 }, { email: 'a@b.com' }))).to.be.instanceOf(TypeError);
+      expect(logger.error).to.not.have.been.called;
+    });
+
+    it('logs and rethrows DB errors on patch without logging values and remains usable', async () => {
+      const model = await createModel({ knex, knexConfig: dbConfig, tableName, selectableProps: ['email'], logger });
+      instances.push(model.knex);
+
+      // A non-numeric string passes input validation but is rejected by the integer id column.
+      const error = await rejectionOf(model.patch('not-a-number', { email: 'secret@example.com' }));
+
+      expect(error.message).to.match(/invalid input syntax for type integer/);
+      expect(logger.error).to.have.been.calledOnceWith('DB update error');
+      expect(logger.error.firstCall.args[1]).to.include({ table: tableName });
+      expect(logger.error.firstCall.args[1].columns).to.deep.equal(['email']);
+      expect(JSON.stringify(logger.error.firstCall.args)).to.not.include('secret@example.com');
+
+      const [created] = await model.create({ email: 'after-patch-error@example.com' });
+      const [patched] = await model.patch(created.id, { email: 'recovered@example.com' });
+      expect(patched.email).to.equal('recovered@example.com');
+    });
+
     it('deletes only the row with the given id', async () => {
       const model = await createModel({ knex, knexConfig: dbConfig, tableName, selectableProps: ['email'], logger });
       instances.push(model.knex);

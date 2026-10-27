@@ -247,6 +247,100 @@ describe('createModel', () => {
     });
   });
 
+  describe('patch', () => {
+    const rows = [{ id: 1, email: 'new@example.com' }];
+    let run;
+    let builder;
+
+    const createPatchModel = async (options = {}, { runError } = {}) => {
+      const { instance } = stubbedKnex();
+      run = runError ? sinon.stub().rejects(runError) : sinon.stub().resolves(rows);
+      sinon.stub(instance.client, 'runner').callsFake(query => {
+        builder = query;
+        return { run };
+      });
+      return createModel({ knex: instance, knexConfig, tableName: 'apps', logger, ...options });
+    };
+
+    it('updates the row by id using bound parameters and returns the selectable props', async () => {
+      const model = await createPatchModel({ selectableProps: ['email'] });
+      const result = await model.patch(1, { email: 'new@example.com' });
+      const { sql, bindings } = builder.toSQL();
+
+      expect(result).to.deep.equal(rows);
+      expect(sql).to.equal(
+        'update "apps" set "email" = ?, "updated_at" = CURRENT_TIMESTAMP where "id" = ? ' +
+        'returning "id", "created_at", "updated_at", "email"'
+      );
+      expect(bindings).to.deep.equal(['new@example.com', 1]);
+    });
+
+    it('binds values as parameters rather than inlining them', async () => {
+      const model = await createPatchModel();
+      const malicious = "x'; DROP TABLE apps; --";
+      await model.patch('abc', { email: malicious });
+      const { sql, bindings } = builder.toSQL();
+
+      expect(sql).to.not.include(malicious);
+      expect(bindings).to.deep.equal([malicious, 'abc']);
+    });
+
+    it('uses the request timeout', async () => {
+      const model = await createPatchModel({ requestTimeout: 4321 });
+      await model.patch(1, { email: 'a@b.com' });
+
+      expect(builder.toSQL().timeout).to.equal(4321);
+    });
+
+    it('overrides a supplied updated_at and does not mutate the input', async () => {
+      const model = await createPatchModel();
+      const fields = { email: 'a@b.com', updated_at: 'yesterday' };
+      await model.patch(1, fields);
+
+      expect(builder.toSQL().sql).to.include('"updated_at" = CURRENT_TIMESTAMP');
+      expect(fields).to.deep.equal({ email: 'a@b.com', updated_at: 'yesterday' });
+    });
+
+    it('logs and rethrows query errors without logging values', async () => {
+      const runError = Object.assign(new Error('query timed out'), { code: '57014' });
+      const model = await createPatchModel({}, { runError });
+      const error = await rejectionOf(model.patch(1, { email: 'a@b.com' }));
+
+      expect(error.message).to.equal('query timed out');
+      expect(logger.error).to.have.been.calledOnceWithExactly(
+        'DB update error', { table: 'apps', columns: ['email'], code: '57014' }
+      );
+    });
+
+    it('continues to work after an error', async () => {
+      const model = await createPatchModel();
+      run.onFirstCall().rejects(new Error('boom'));
+
+      await rejectionOf(model.patch(1, { email: 'a@b.com' }));
+      expect(await model.patch(1, { email: 'a@b.com' })).to.deep.equal(rows);
+    });
+
+    it('rejects invalid input without querying the DB', async () => {
+      const model = await createPatchModel();
+      const invalid = [
+        [1, {}],
+        [1, null],
+        [1, 'email'],
+        [1, { 'email; drop table apps': 'x' }],
+        [1, { email: { $ne: '' } }],
+        [{ $ne: 1 }, { email: 'a@b.com' }],
+        [undefined, { email: 'a@b.com' }],
+        [NaN, { email: 'a@b.com' }]
+      ];
+
+      for (const [id, fields] of invalid) {
+        expect(await rejectionOf(model.patch(id, fields))).to.be.instanceOf(TypeError);
+      }
+      expect(run).to.not.have.been.called;
+      expect(logger.error).to.not.have.been.called;
+    });
+  });
+
   describe('create', () => {
     const rows = [{ id: 1, email: 'test@example.com' }];
     let instance;
