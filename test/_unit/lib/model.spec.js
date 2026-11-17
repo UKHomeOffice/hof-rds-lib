@@ -247,6 +247,120 @@ describe('createModel', () => {
     });
   });
 
+  describe('getCount', () => {
+    let run;
+    let builder;
+
+    const createCountModel = async (options = {}) => {
+      const { instance } = stubbedKnex();
+      run = sinon.stub().resolves([{ count: '2' }]);
+      sinon.stub(instance.client, 'runner').callsFake(query => {
+        builder = query;
+        return { run };
+      });
+      return createModel({ knex: instance, knexConfig, tableName: 'apps', logger, ...options });
+    };
+
+    it('counts matching rows and converts the PostgreSQL count string to a number', async () => {
+      const model = await createCountModel({ selectableProps: ['email'] });
+
+      expect(await model.getCount({ email: 'test@example.com' })).to.equal(2);
+      expect(builder.toSQL().sql).to.equal('select count(*) as "count" from "apps" where "email" = ?');
+      expect(builder.toSQL().bindings).to.deep.equal(['test@example.com']);
+    });
+
+    it('counts all rows when filters are omitted or empty', async () => {
+      const model = await createCountModel();
+
+      for (const where of [undefined, {}]) {
+        expect(await model.getCount(where)).to.equal(2);
+        expect(builder.toSQL().sql).to.equal('select count(*) as "count" from "apps"');
+      }
+    });
+
+    it('returns zero when no rows match', async () => {
+      const model = await createCountModel();
+      run.resolves([{ count: '0' }]);
+
+      expect(await model.getCount({ id: 1 })).to.equal(0);
+    });
+
+    it('combines multiple criteria with AND and handles nulls without mutating filters', async () => {
+      const model = await createCountModel();
+      const where = Object.freeze({ email: 'test@example.com', deleted_at: null });
+      await model.getCount(where);
+
+      expect(builder.toSQL().sql).to.equal(
+        'select count(*) as "count" from "apps" where "email" = ? and "deleted_at" is null'
+      );
+      expect(builder.toSQL().bindings).to.deep.equal(['test@example.com']);
+      expect(where).to.deep.equal({ email: 'test@example.com', deleted_at: null });
+    });
+
+    it('binds malicious values as parameters', async () => {
+      const model = await createCountModel();
+      const malicious = "x' OR '1'='1";
+      await model.getCount({ email: malicious });
+
+      expect(builder.toSQL().sql).to.not.include(malicious);
+      expect(builder.toSQL().bindings).to.deep.equal([malicious]);
+    });
+
+    it('uses the timeout supplied during initialisation', async () => {
+      const model = await createCountModel({ requestTimeout: 1234 });
+      await model.getCount();
+
+      expect(builder.toSQL().timeout).to.equal(1234);
+    });
+
+    it('uses the default timeout when none is supplied', async () => {
+      const model = await createCountModel();
+      await model.getCount();
+
+      expect(builder.toSQL().timeout).to.equal(10000);
+    });
+
+    it('logs and rethrows DB errors without logging filter values and remains usable', async () => {
+      const model = await createCountModel();
+      const failure = Object.assign(new Error('query failed for secret@example.com'), { code: '42703' });
+      run.onFirstCall().rejects(failure);
+
+      expect(await rejectionOf(model.getCount({ email: 'secret@example.com' }))).to.equal(failure);
+      expect(logger.error).to.have.been.calledOnceWithExactly(
+        'DB count error', { table: 'apps', columns: ['email'], code: '42703' }
+      );
+      expect(JSON.stringify(logger.error.firstCall.args)).to.not.include('secret@example.com');
+      expect(await model.getCount()).to.equal(2);
+    });
+
+    it('propagates timeout errors and allows subsequent queries', async () => {
+      const model = await createCountModel();
+      const failure = new Error('Defined query timeout of 1234ms exceeded when running query.');
+      failure.name = 'KnexTimeoutError';
+      run.onFirstCall().rejects(failure);
+
+      expect(await rejectionOf(model.getCount())).to.equal(failure);
+      expect(await model.getCount()).to.equal(2);
+    });
+
+    it('rejects invalid input before executing a query', async () => {
+      const model = await createCountModel();
+      const invalid = [
+        null, 'id = 1', [], 42, true, new Date(),
+        { 'id; drop table apps': 1 }, { email: { $ne: '' } },
+        { email: undefined }, { id: NaN }, { id: Infinity }, { created_at: new Date('invalid') },
+        { email: () => 'unsafe' }
+      ];
+
+      for (const where of invalid) {
+        expect(await rejectionOf(model.getCount(where))).to.be.instanceOf(TypeError);
+      }
+      expect(run).to.not.have.been.called;
+      expect(logger.error).to.not.have.been.called;
+      expect(await model.getCount()).to.equal(2);
+    });
+  });
+
   describe('patch', () => {
     const rows = [{ id: 1, email: 'new@example.com' }];
     let run;

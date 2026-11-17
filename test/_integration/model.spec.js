@@ -251,6 +251,88 @@ describe('createModel with a real knex connection', () => {
       expect(await model.get({ email: 'missing@example.com' })).to.deep.equal([]);
     });
 
+    describe('getCount', () => {
+      let model;
+
+      beforeEach(async () => {
+        model = await createModel({ knex, knexConfig: dbConfig, tableName, requestTimeout: 2000, logger });
+        instances.push(model.knex);
+      });
+
+      it('counts all rows and reflects inserts and deletes', async () => {
+        const initialCount = (await model.get()).length;
+        expect(await model.getCount()).to.equal(initialCount);
+
+        const [created] = await model.create({ email: 'count-total@example.com' });
+        expect(await model.getCount({})).to.equal(initialCount + 1);
+
+        await model.delete(created.id);
+        expect(await model.getCount()).to.equal(initialCount);
+      });
+
+      it('counts matching rows, combines filters and returns zero for no matches', async () => {
+        const email = 'count-filter@example.com';
+        const [created] = await model.create({ email });
+        await model.create({ email });
+
+        expect(await model.getCount({ email })).to.equal(2);
+        expect(await model.getCount({ email, id: created.id })).to.equal(1);
+        expect(await model.getCount({ email: 'count-missing@example.com' })).to.equal(0);
+      });
+
+      it('counts null values using IS NULL', async () => {
+        const [created] = await model.create({ email: null });
+
+        expect(await model.getCount({ id: created.id, email: null })).to.equal(1);
+      });
+
+      it('treats injection-like values as data and rejects invalid input', async () => {
+        const email = "count'; DROP TABLE hof_rds_lib_test; --";
+        await model.create({ email });
+
+        expect(await model.getCount({ email })).to.equal(1);
+        expect(await model.getCount({ email: "' OR '1'='1" })).to.equal(0);
+        for (const where of [null, [], 'id = 1', { 'email; DROP TABLE apps': 'x' }, { email: {} }]) {
+          expect(await rejectionOf(model.getCount(where))).to.be.instanceOf(TypeError);
+        }
+        expect(logger.error).to.not.have.been.called;
+        expect(await model.getCount({ email })).to.equal(1);
+      });
+
+      it('returns DB errors to the caller without logging values and remains usable', async () => {
+        const error = await rejectionOf(model.getCount({ missing_count_column: 'private-value' }));
+
+        expect(error.code).to.equal('42703');
+        expect(error.message).to.include('missing_count_column');
+        expect(logger.error).to.have.been.calledOnceWithExactly(
+          'DB count error', { table: tableName, columns: ['missing_count_column'], code: '42703' }
+        );
+        expect(JSON.stringify(logger.error.firstCall.args)).to.not.include('private-value');
+        expect(await model.getCount({ id: 2147483647 })).to.equal(0);
+      });
+
+      it('uses the initialised timeout for a blocked count and recovers afterwards', async () => {
+        const shortTimeoutModel = await createModel({
+          knex, knexConfig: dbConfig, tableName, requestTimeout: 200, logger
+        });
+        instances.push(shortTimeoutModel.knex);
+        const transaction = await setup.transaction();
+
+        try {
+          await transaction.schema.alterTable(tableName, table => table.boolean('count_lock'));
+          const error = await rejectionOf(shortTimeoutModel.getCount());
+
+          expect(error.name).to.equal('KnexTimeoutError');
+          expect(error.message).to.include('200ms');
+          expect(logger.error).to.have.been.calledOnceWith('DB count error');
+        } finally {
+          await transaction.rollback();
+        }
+
+        expect(await shortTimeoutModel.getCount({ id: 2147483647 })).to.equal(0);
+      });
+    });
+
     it('patches only the row with the given id and refreshes updated_at', async () => {
       const model = await createModel({ knex, knexConfig: dbConfig, tableName, selectableProps: ['email'], logger });
       instances.push(model.knex);

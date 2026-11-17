@@ -70,6 +70,28 @@ try {
 - `where` must be a plain object. Keys must be valid column names (`[A-Za-z_][A-Za-z0-9_]*`) and values must be a string, finite number, boolean, valid `Date` or `null`. Anything else rejects with a `TypeError` before the DB is queried.
 - DB errors are logged with the table and the filtered column names (never the filter values), then rethrown to the caller.
 
+### `model.getCount(where)`
+
+Async. Returns the number of rows in the model's table matching every key/value pair in `where` (combined with `AND`). Omit `where` or pass `{}` to count all rows. Returns `0` when no rows match. PostgreSQL count strings are converted to JavaScript numbers; counts above `Number.MAX_SAFE_INTEGER` may lose precision. The count is independent of `selectableProps` and uses the `requestTimeout` supplied when the model was initialised (default `10000` ms).
+
+```js
+const total = await model.getCount();
+const matching = await model.getCount({ email: 'test@example.com' });
+const withoutSession = await model.getCount({ email: 'test@example.com', session: null });
+
+try {
+  const count = await model.getCount({ email: 'test@example.com' });
+  console.log(count); // a number, e.g. 2
+} catch (error) {
+  console.error(error.message);
+  // Invalid input, DB errors and timeouts reject; subsequent calls can still be made.
+}
+```
+
+- Uses Knex's `count` query builder, not raw SQL. Filter values are bound as parameters, and `null` becomes `IS NULL`.
+- `where` must be a plain object with valid column-name keys (`[A-Za-z_][A-Za-z0-9_]*`). Values must be strings, finite numbers, booleans, valid `Date` objects or `null`. Invalid input rejects with a `TypeError` before querying the DB; inputs are not mutated.
+- DB errors and timeouts are rethrown to the caller. Logging includes only the table, filtered column names and error code, not filter values or potentially sensitive DB error messages. The model remains usable after an error.
+
 ### `model.patch(id, fields)`
 
 Async. Updates the row whose `id` matches, setting each column in `fields` and refreshing `updated_at`. Resolves with an array of the updated rows (only the model's `selectableProps`), which is empty if no row matched. The query uses the model's `requestTimeout`.
