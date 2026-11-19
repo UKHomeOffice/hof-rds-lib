@@ -70,6 +70,44 @@ try {
 - `where` must be a plain object. Keys must be valid column names (`[A-Za-z_][A-Za-z0-9_]*`) and values must be a string, finite number, boolean, valid `Date` or `null`. Anything else rejects with a `TypeError` before the DB is queried.
 - DB errors are logged with the table and the filtered column names (never the filter values), then rethrown to the caller.
 
+### `model.getInTimeRange(options)`
+
+Async. Returns rows whose timestamp column falls within an inclusive time range (both `from` and `to` are included). Uses the `requestTimeout` supplied when the model was initialised. Returns an empty array when nothing matches. This follows the `hof-rds-api` history query contract.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `timestamp` | required | Timestamp column to filter, e.g. `'created_at'` or `'updated_at'` |
+| `from` | required | Lower bound: a valid `Date` or parseable date string |
+| `to` | database current time | Upper bound: a valid `Date` or parseable date string; must not precede `from` |
+| `withValue` | omitted | Only include rows where this column is not `NULL` (empty strings still match) |
+| `selectableProps` | model's configured columns | Per-call comma-separated column names, appended to `id`, `created_at`, `updated_at`; `'*'` selects all columns |
+
+```js
+const rows = await model.getInTimeRange({
+  timestamp: 'created_at',
+  from: '2026-02-01T00:00:00.000Z',
+  to: '2026-02-05T00:00:00.000Z',
+  withValue: 'email',
+  selectableProps: 'email,session'
+});
+
+try {
+  const recent = await model.getInTimeRange({
+    timestamp: 'updated_at',
+    from: new Date('2026-02-01T00:00:00.000Z')
+  }); // through the database's current time
+  console.log(recent);
+} catch (error) {
+  console.error(error.message);
+  // Invalid input, DB errors and timeouts reject; subsequent calls can still be made.
+}
+```
+
+- Uses Knex's `whereBetween`, optional `whereNotNull`, and `fn.now()` builders, with no raw SQL. Date bounds are bound as parameters. Prefer ISO 8601 strings with an explicit timezone (as above) to avoid ambiguous dates; a date-only upper bound means midnight, not the end of that day.
+- Options must be a plain object. Column names, including per-call selections, must match `[A-Za-z_][A-Za-z0-9_]*` (except a standalone `'*'` selection). Missing required options, invalid dates, reversed explicit bounds and invalid column names reject with a `TypeError` before querying. Optional fields must be omitted or `undefined`, not `null` or empty strings.
+- Per-call selections do not mutate the options or the model's configured columns. Like the upstream API, they override the model selection, not an authorisation boundary; restrict caller-controlled selections in the consuming service as needed.
+- DB errors and timeouts are rethrown with their original messages. Logs contain only the table and error code, not date bounds, row values or DB error messages. The model remains usable after an error.
+
 ### `model.getCount(where)`
 
 Async. Returns the number of rows in the model's table matching every key/value pair in `where` (combined with `AND`). Omit `where` or pass `{}` to count all rows. Returns `0` when no rows match. PostgreSQL count strings are converted to JavaScript numbers; counts above `Number.MAX_SAFE_INTEGER` may lose precision. The count is independent of `selectableProps` and uses the `requestTimeout` supplied when the model was initialised (default `10000` ms).

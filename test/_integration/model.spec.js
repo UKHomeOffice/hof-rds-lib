@@ -251,6 +251,118 @@ describe('createModel with a real knex connection', () => {
       expect(await model.get({ email: 'missing@example.com' })).to.deep.equal([]);
     });
 
+    describe('getInTimeRange', () => {
+      let model;
+      const range = {
+        timestamp: 'created_at', from: '2001-02-01T00:00:00.000Z', to: '2001-02-05T00:00:00.000Z'
+      };
+
+      beforeEach(async () => {
+        model = await createModel({
+          knex, knexConfig: dbConfig, tableName, requestTimeout: 2000, selectableProps: ['email'], logger
+        });
+        instances.push(model.knex);
+      });
+
+      it('includes both boundaries and excludes rows outside the range', async () => {
+        const dates = ['2001-01-31T23:59:59.999Z', range.from, '2001-02-03T00:00:00.000Z',
+          range.to, '2001-02-05T00:00:00.001Z'];
+        const created = await Promise.all(dates.map(createdAt => model.create({
+          email: 'range-boundary@example.com', created_at: createdAt
+        })));
+        try {
+          const rows = await model.getInTimeRange(range);
+          expect(rows.map(row => row.id)).to.have.members(created.slice(1, 4).map(([row]) => row.id));
+          expect(rows[0]).to.have.all.keys('id', 'created_at', 'updated_at', 'email');
+          expect(await model.getInTimeRange({ ...range, from: range.to })).to.deep.equal(created[3]);
+          expect(await model.getInTimeRange({ ...range, from: '2001-02-04', to: '2001-02-04' }))
+            .to.deep.equal([]);
+        } finally {
+          await Promise.all(created.map(([row]) => model.delete(row.id)));
+        }
+      });
+
+      it('filters non-null values and supports per-call projections without persisting them', async () => {
+        const [present] = await model.create({ email: 'range-present@example.com', created_at: range.from });
+        const [absent] = await model.create({ email: null, created_at: range.from });
+        try {
+          const rows = await model.getInTimeRange({ ...range, withValue: 'email', selectableProps: 'email' });
+          expect(rows).to.deep.equal([present]);
+          const defaults = await createModel({ knex: model.knex, knexConfig: dbConfig, tableName, logger });
+          expect((await defaults.getInTimeRange({ ...range, selectableProps: '*' }))[0]).to.have.property('email');
+          expect((await defaults.getInTimeRange(range))[0]).to.not.have.property('email');
+        } finally {
+          await model.delete(present.id);
+          await model.delete(absent.id);
+        }
+      });
+
+      it('defaults to database time, accepts Date bounds and excludes future rows', async () => {
+        const from = new Date('2002-01-01T00:00:00.000Z');
+        const [past] = await model.create({ email: 'range-past@example.com', created_at: from });
+        const [future] = await model.create({
+          email: 'range-future@example.com', created_at: '9999-01-01T00:00:00.000Z'
+        });
+        try {
+          const rows = await model.getInTimeRange({ timestamp: 'created_at', from });
+          expect(rows.map(row => row.id)).to.include(past.id).and.not.include(future.id);
+        } finally {
+          await model.delete(past.id);
+          await model.delete(future.id);
+        }
+      });
+
+      it('rejects injection attempts and invalid input, then permits subsequent reads', async () => {
+        const invalid = [null, [], {},
+          { ...range, timestamp: 'created_at; DROP TABLE hof_rds_lib_test' },
+          { ...range, from: "2001-02-01'; DROP TABLE hof_rds_lib_test; --" },
+          { ...range, to: 'invalid' }, { ...range, to: '2000-01-01' },
+          { ...range, withValue: 'email) OR TRUE --' },
+          { ...range, selectableProps: 'email, pg_sleep(10)' }];
+
+        for (const options of invalid) {
+          expect(await rejectionOf(model.getInTimeRange(options))).to.be.instanceOf(TypeError);
+        }
+        expect(logger.error).to.not.have.been.called;
+        expect(await model.getInTimeRange(range)).to.deep.equal([]);
+      });
+
+      it('returns DB errors to the caller, logs only metadata and remains usable', async () => {
+        for (const options of [{ ...range, timestamp: 'missing_range_column' },
+          { ...range, withValue: 'missing_range_column' }, { ...range, selectableProps: 'missing_range_column' }]) {
+          const error = await rejectionOf(model.getInTimeRange(options));
+
+          expect(error.code).to.equal('42703');
+          expect(error.message).to.include('missing_range_column');
+          expect(logger.error.lastCall).to.have.been.calledWithExactly(
+            'DB time range read error', { table: tableName, code: '42703' }
+          );
+          expect(await model.getInTimeRange(range)).to.deep.equal([]);
+        }
+      });
+
+      it('uses the initialised timeout for a blocked read and recovers afterwards', async () => {
+        const shortTimeoutModel = await createModel({
+          knex, knexConfig: dbConfig, tableName, requestTimeout: 200, logger
+        });
+        instances.push(shortTimeoutModel.knex);
+        const transaction = await setup.transaction();
+
+        try {
+          await transaction.schema.alterTable(tableName, table => table.boolean('range_lock'));
+          const error = await rejectionOf(shortTimeoutModel.getInTimeRange(range));
+
+          expect(error.name).to.equal('KnexTimeoutError');
+          expect(error.message).to.include('200ms');
+          expect(logger.error).to.have.been.calledOnceWith('DB time range read error');
+        } finally {
+          await transaction.rollback();
+        }
+
+        expect(await shortTimeoutModel.getInTimeRange(range)).to.deep.equal([]);
+      });
+    });
+
     describe('getCount', () => {
       let model;
 

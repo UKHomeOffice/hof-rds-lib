@@ -247,6 +247,99 @@ describe('createModel', () => {
     });
   });
 
+  describe('getInTimeRange', () => {
+    const range = { timestamp: 'created_at', from: '2026-02-01', to: '2026-02-05' };
+    const rows = [{ id: 1 }];
+    let run;
+    let builder;
+
+    const createRangeModel = async (options = {}) => {
+      const { instance } = stubbedKnex();
+      run = sinon.stub().resolves(rows);
+      sinon.stub(instance.client, 'runner').callsFake(query => {
+        builder = query;
+        return { run };
+      });
+      return createModel({ knex: instance, knexConfig, tableName: 'apps', logger, ...options });
+    };
+
+    it('selects configured columns with inclusive parameterised bounds and the initialised timeout', async () => {
+      const model = await createRangeModel({ selectableProps: ['email'], requestTimeout: 1234 });
+
+      expect(await model.getInTimeRange(range)).to.deep.equal(rows);
+      expect(builder.toSQL().sql).to.equal(
+        'select "id", "created_at", "updated_at", "email" from "apps" where "created_at" between ? and ?'
+      );
+      expect(builder.toSQL().bindings).to.deep.equal([range.from, range.to]);
+      expect(builder.toSQL().timeout).to.equal(1234);
+    });
+
+    it('defaults the upper bound to database time and supports a non-null column', async () => {
+      const model = await createRangeModel();
+      await model.getInTimeRange({ timestamp: 'updated_at', from: range.from, withValue: 'email' });
+
+      expect(builder.toSQL().sql).to.equal(
+        'select "id", "created_at", "updated_at" from "apps" ' +
+        'where "email" is not null and "updated_at" between ? and CURRENT_TIMESTAMP'
+      );
+      expect(builder.toSQL().bindings).to.deep.equal([range.from]);
+    });
+
+    it('supports per-call selectableProps without changing the model or input', async () => {
+      const model = await createRangeModel();
+      const options = Object.freeze({ ...range, selectableProps: 'email, id' });
+      await model.getInTimeRange(options);
+
+      expect(builder.toSQL().sql).to.include('select "id", "created_at", "updated_at", "email" from');
+      expect(model.selectableProps).to.deep.equal(DEFAULT_SELECTABLE_PROPS);
+      expect(options).to.deep.equal({ ...range, selectableProps: 'email, id' });
+      await model.getInTimeRange({ ...range, selectableProps: '*' });
+      expect(builder.toSQL().sql).to.include('select * from');
+    });
+
+    it('accepts Date bounds, including equal bounds, and returns an empty result when nothing matches', async () => {
+      const model = await createRangeModel();
+      const date = new Date('2026-02-01T00:00:00Z');
+      run.resolves([]);
+
+      expect(await model.getInTimeRange({ ...range, from: date, to: date })).to.deep.equal([]);
+      expect(builder.toSQL().bindings).to.deep.equal([date, date]);
+    });
+
+    it('rejects invalid options, identifiers, dates and projections before querying', async () => {
+      const model = await createRangeModel();
+      const invalid = [undefined, null, [], 'created_at', {},
+        ...[null, 1, {}, 'created_at; DROP TABLE apps', 'apps.created_at'].map(timestamp => ({ ...range, timestamp })),
+        ...[undefined, null, '', 'not-a-date', "2026-02-01' OR '1'='1", 123, {}, new Date(NaN)]
+          .map(from => ({ ...range, from })),
+        ...[null, '', 'not-a-date', false, new Date(NaN), '2026-01-01'].map(to => ({ ...range, to })),
+        ...[null, '', {}, 'email; DROP TABLE apps'].map(withValue => ({ ...range, withValue })),
+        ...[null, '', [], '*,email', 'email,,id', 'email; DROP TABLE apps', 'email as secret']
+          .map(selectableProps => ({ ...range, selectableProps }))];
+
+      for (const options of invalid) {
+        expect(await rejectionOf(model.getInTimeRange(options))).to.be.instanceOf(TypeError);
+      }
+      expect(run).to.not.have.been.called;
+      expect(await model.getInTimeRange(range)).to.deep.equal(rows);
+    });
+
+    it('rethrows database errors and timeouts, logs no values, and remains usable', async () => {
+      const model = await createRangeModel();
+      for (const error of [Object.assign(new Error('private value'), { code: '42703' }),
+        Object.assign(new Error('query timed out'), { name: 'KnexTimeoutError' })]) {
+        run.rejects(error);
+        expect(await rejectionOf(model.getInTimeRange(range))).to.equal(error);
+        expect(logger.error.lastCall).to.have.been.calledWithExactly(
+          'DB time range read error', { table: 'apps', code: error.code }
+        );
+        expect(JSON.stringify(logger.error.lastCall.args)).to.not.include(error.message);
+        run.resolves(rows);
+        expect(await model.getInTimeRange(range)).to.deep.equal(rows);
+      }
+    });
+  });
+
   describe('getCount', () => {
     let run;
     let builder;
