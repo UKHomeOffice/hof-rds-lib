@@ -1,10 +1,7 @@
-import { expect } from 'chai';
-import sinon from 'sinon';
+import { expect, jest } from '@jest/globals';
 import knex from 'knex';
 import createModel, {
-  DEFAULT_SELECTABLE_PROPS,
-  defineSelectableProps,
-  validateColumnValues
+  DEFAULT_SELECTABLE_PROPS
 } from '../../../lib/model.js';
 import loggerFactory from '../../../lib/logger.js';
 
@@ -15,18 +12,28 @@ const knexConfig = {
 const loggedDetails = { client: 'pg', table: 'apps', host: 'localhost', port: 5432, database: 'test_db' };
 
 describe('createModel', () => {
+  const expectFirstCallStartsWith = (mock, ...args) => {
+    expect(mock).toHaveBeenCalledTimes(1);
+    expect(mock.mock.calls[0].slice(0, args.length)).toEqual(args);
+  };
   let instances;
   let logger;
+  let rawRestorers;
 
   // Real knex instance (no connection is made until a query runs) with only the DB round-trips stubbed.
   const stubbedKnex = ({ config = knexConfig, rawError, hasTable = true, hasTableError } = {}) => {
     const instance = knex(config);
     instances.push(instance);
 
-    const timeout = rawError ? sinon.stub().rejects(rawError) : sinon.stub().resolves();
-    const raw = sinon.stub(instance, 'raw').returns({ timeout });
-    const hasTableStub = hasTableError ? sinon.stub().rejects(hasTableError) : sinon.stub().resolves(hasTable);
-    sinon.stub(instance.client, 'schemaBuilder').returns({ hasTable: hasTableStub });
+    const timeout = rawError ? jest.fn().mockRejectedValue(rawError) : jest.fn().mockResolvedValue();
+    const rawDescriptor = Object.getOwnPropertyDescriptor(instance, 'raw');
+    const raw = jest.fn().mockReturnValue({ timeout });
+    Object.defineProperty(instance, 'raw', { ...rawDescriptor, value: raw });
+    rawRestorers.push(() => Object.defineProperty(instance, 'raw', rawDescriptor));
+    const hasTableStub = hasTableError
+      ? jest.fn().mockRejectedValue(hasTableError)
+      : jest.fn().mockResolvedValue(hasTable);
+    jest.spyOn(instance.client, 'schemaBuilder').mockReturnValue({ hasTable: hasTableStub });
 
     return { instance, raw, timeout, hasTable: hasTableStub };
   };
@@ -35,14 +42,16 @@ describe('createModel', () => {
 
   beforeEach(() => {
     instances = [];
+    rawRestorers = [];
     logger = loggerFactory();
-    sinon.spy(logger, 'info');
-    sinon.spy(logger, 'warn');
-    sinon.spy(logger, 'error');
+    jest.spyOn(logger, 'info');
+    jest.spyOn(logger, 'warn');
+    jest.spyOn(logger, 'error');
   });
 
   afterEach(async () => {
-    sinon.restore();
+    jest.restoreAllMocks();
+    rawRestorers.forEach(restore => restore());
     await Promise.all(instances.map(instance => instance.destroy()));
   });
 
@@ -51,21 +60,24 @@ describe('createModel', () => {
       const { instance } = stubbedKnex();
       const model = await createModel({ knex: instance, knexConfig, tableName: 'apps', logger });
 
-      expect(model.knex).to.equal(instance);
-      expect(model.tableName).to.equal('apps');
-      expect(model.requestTimeout).to.equal(10000);
-      expect(model.selectableProps).to.deep.equal(DEFAULT_SELECTABLE_PROPS);
-      expect(model.logger).to.equal(logger);
+      expect(model.knex).toBe(instance);
+      expect(model.tableName).toBe('apps');
+      expect(model.requestTimeout).toBe(10000);
+      expect(model.selectableProps).toEqual(DEFAULT_SELECTABLE_PROPS);
+      expect(model.logger).toBe(logger);
     });
 
     it('verifies the connection and table using the request timeout', async () => {
       const { instance, raw, timeout, hasTable } = stubbedKnex();
       const model = await createModel({ knex: instance, knexConfig, tableName: 'apps', requestTimeout: 2500, logger });
 
-      expect(raw).to.have.been.calledOnceWithExactly('select 1');
-      expect(timeout).to.have.been.calledOnceWithExactly(2500);
-      expect(hasTable).to.have.been.calledOnceWithExactly('apps');
-      expect(model.requestTimeout).to.equal(2500);
+      expect(raw).toHaveBeenCalledTimes(1);
+      expect(raw).toHaveBeenNthCalledWith(1, 'select 1');
+      expect(timeout).toHaveBeenCalledTimes(1);
+      expect(timeout).toHaveBeenNthCalledWith(1, 2500);
+      expect(hasTable).toHaveBeenCalledTimes(1);
+      expect(hasTable).toHaveBeenNthCalledWith(1, 'apps');
+      expect(model.requestTimeout).toBe(2500);
     });
 
     it('applies custom selectable props on top of the defaults', async () => {
@@ -74,18 +86,18 @@ describe('createModel', () => {
         knex: instance, knexConfig, tableName: 'apps', selectableProps: ['email', 'session'], logger
       });
 
-      expect(model.selectableProps).to.deep.equal([...DEFAULT_SELECTABLE_PROPS, 'email', 'session']);
+      expect(model.selectableProps).toEqual([...DEFAULT_SELECTABLE_PROPS, 'email', 'session']);
     });
 
     it('logs the attempt and success with connection details but no credentials', async () => {
       const { instance } = stubbedKnex();
       await createModel({ knex: instance, knexConfig, tableName: 'apps', logger });
 
-      expect(logger.info).to.have.been.calledTwice;
-      expect(logger.info.firstCall).to.have.been.calledWithExactly('Attempting DB connection', loggedDetails);
-      expect(logger.info.secondCall).to.have.been.calledWithExactly('DB connection successful', loggedDetails);
-      expect(logger.warn).to.not.have.been.called;
-      expect(logger.error).to.not.have.been.called;
+      expect(logger.info).toHaveBeenCalledTimes(2);
+      expect(logger.info).toHaveBeenNthCalledWith(1, 'Attempting DB connection', loggedDetails);
+      expect(logger.info).toHaveBeenNthCalledWith(2, 'DB connection successful', loggedDetails);
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
     });
 
     it('does not log a connection string', async () => {
@@ -93,8 +105,8 @@ describe('createModel', () => {
       const { instance } = stubbedKnex({ config });
       await createModel({ knex: instance, knexConfig: config, tableName: 'apps', logger });
 
-      for (const call of logger.info.getCalls()) {
-        expect(call.args[1]).to.deep.equal({ client: 'pg', table: 'apps' });
+      for (const call of logger.info.mock.calls) {
+        expect(call[1]).toEqual({ client: 'pg', table: 'apps' });
       }
     });
 
@@ -102,7 +114,7 @@ describe('createModel', () => {
       const { instance } = stubbedKnex();
       const model = await createModel({ knex: instance, knexConfig, tableName: 'apps' });
 
-      expect(model.logger.logSession).to.be.a('function');
+      expect(model.logger.logSession).toEqual(expect.any(Function));
     });
   });
 
@@ -111,19 +123,21 @@ describe('createModel', () => {
       const { instance } = stubbedKnex({ rawError: new Error('ECONNREFUSED') });
       const error = await rejectionOf(createModel({ knex: instance, knexConfig, tableName: 'apps', logger }));
 
-      expect(error.message).to.equal('ECONNREFUSED');
-      expect(logger.error).to.have.been.calledOnceWithExactly(
+      expect(error.message).toBe('ECONNREFUSED');
+      expect(logger.error).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenNthCalledWith(1,
         'DB connection error', { ...loggedDetails, error: 'ECONNREFUSED' }
       );
-      expect(logger.error).to.have.been.calledAfter(logger.info);
+      expect(logger.error.mock.invocationCallOrder[0]).toBeGreaterThan(logger.info.mock.invocationCallOrder[0]);
     });
 
     it('logs and rethrows errors from the table check', async () => {
       const { instance } = stubbedKnex({ hasTableError: new Error('permission denied') });
       const error = await rejectionOf(createModel({ knex: instance, knexConfig, tableName: 'apps', logger }));
 
-      expect(error.message).to.equal('permission denied');
-      expect(logger.error).to.have.been.calledOnceWithExactly(
+      expect(error.message).toBe('permission denied');
+      expect(logger.error).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenNthCalledWith(1,
         'DB connection error', { ...loggedDetails, error: 'permission denied' }
       );
     });
@@ -132,20 +146,21 @@ describe('createModel', () => {
       const { instance } = stubbedKnex({ hasTable: false });
       const error = await rejectionOf(createModel({ knex: instance, knexConfig, tableName: 'apps', logger }));
 
-      expect(error.message).to.equal('Table "apps" does not exist');
-      expect(logger.warn).to.have.been.calledOnceWithExactly(
+      expect(error.message).toBe('Table "apps" does not exist');
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenNthCalledWith(1,
         'DB connection failed', { ...loggedDetails, error: 'Table "apps" does not exist' }
       );
-      expect(logger.error).to.not.have.been.called;
+      expect(logger.error).not.toHaveBeenCalled();
     });
 
     it('logs and rethrows errors from creating the knex instance', async () => {
       const badConfig = { client: 'not-a-real-client', connection: {} };
       const error = await rejectionOf(createModel({ knex, knexConfig: badConfig, tableName: 'apps', logger }));
 
-      expect(error.message).to.match(/Unknown configuration option 'client'/);
-      expect(logger.info).to.have.been.calledOnceWith('Attempting DB connection');
-      expect(logger.error).to.have.been.calledOnceWith('DB connection error');
+      expect(error.message).toMatch(/Unknown configuration option 'client'/);
+      expectFirstCallStartsWith(logger.info, 'Attempting DB connection');
+      expectFirstCallStartsWith(logger.error, 'DB connection error');
     });
   });
 
@@ -158,8 +173,8 @@ describe('createModel', () => {
     // Captures the built query and stubs only its execution.
     const createGetModel = async (options = {}, { runError } = {}) => {
       ({ instance } = stubbedKnex());
-      run = runError ? sinon.stub().rejects(runError) : sinon.stub().resolves(rows);
-      sinon.stub(instance.client, 'runner').callsFake(query => {
+      run = runError ? jest.fn().mockRejectedValue(runError) : jest.fn().mockResolvedValue(rows);
+      jest.spyOn(instance.client, 'runner').mockImplementation(query => {
         builder = query;
         return { run };
       });
@@ -171,9 +186,9 @@ describe('createModel', () => {
       const result = await model.get({ email: 'test@example.com' });
       const { sql, bindings } = builder.toSQL();
 
-      expect(result).to.deep.equal(rows);
-      expect(sql).to.equal('select "id", "created_at", "updated_at", "email" from "apps" where "email" = ?');
-      expect(bindings).to.deep.equal(['test@example.com']);
+      expect(result).toEqual(rows);
+      expect(sql).toBe('select "id", "created_at", "updated_at", "email" from "apps" where "email" = ?');
+      expect(bindings).toEqual(['test@example.com']);
     });
 
     it('combines multiple criteria and handles nulls', async () => {
@@ -181,17 +196,17 @@ describe('createModel', () => {
       await model.get({ email: 'test@example.com', id: 1, deleted_at: null });
       const { sql, bindings } = builder.toSQL();
 
-      expect(sql).to.equal(
+      expect(sql).toBe(
         'select "id", "created_at", "updated_at" from "apps" where "email" = ? and "id" = ? and "deleted_at" is null'
       );
-      expect(bindings).to.deep.equal(['test@example.com', 1]);
+      expect(bindings).toEqual(['test@example.com', 1]);
     });
 
     it('returns all rows when no criteria are given', async () => {
       const model = await createGetModel();
       await model.get();
 
-      expect(builder.toSQL().sql).to.equal('select "id", "created_at", "updated_at" from "apps"');
+      expect(builder.toSQL().sql).toBe('select "id", "created_at", "updated_at" from "apps"');
     });
 
     it('binds values as parameters rather than inlining them', async () => {
@@ -200,15 +215,15 @@ describe('createModel', () => {
       await model.get({ email: malicious });
       const { sql, bindings } = builder.toSQL();
 
-      expect(sql).to.not.include(malicious);
-      expect(bindings).to.deep.equal([malicious]);
+      expect(sql).not.toContain(malicious);
+      expect(bindings).toEqual([malicious]);
     });
 
     it('uses the request timeout', async () => {
       const model = await createGetModel({ requestTimeout: 1234 });
       await model.get({ id: 1 });
 
-      expect(builder.toSQL().timeout).to.equal(1234);
+      expect(builder.toSQL().timeout).toBe(1234);
     });
 
     it('does not mutate the where object', async () => {
@@ -216,34 +231,35 @@ describe('createModel', () => {
       const where = { id: 1 };
       await model.get(where);
 
-      expect(where).to.deep.equal({ id: 1 });
+      expect(where).toEqual({ id: 1 });
     });
 
     it('logs and rethrows query errors without logging filter values', async () => {
       const model = await createGetModel({}, { runError: new Error('query timed out') });
       const error = await rejectionOf(model.get({ email: 'test@example.com' }));
 
-      expect(error.message).to.equal('query timed out');
-      expect(logger.error).to.have.been.calledOnceWithExactly(
+      expect(error.message).toBe('query timed out');
+      expect(logger.error).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenNthCalledWith(1,
         'DB read error', { table: 'apps', columns: ['email'], error: 'query timed out' }
       );
     });
 
     it('continues to work after an error', async () => {
       const model = await createGetModel();
-      run.onFirstCall().rejects(new Error('boom'));
+      run.mockRejectedValueOnce(new Error('boom'));
 
       await rejectionOf(model.get({ id: 1 }));
-      expect(await model.get({ id: 1 })).to.deep.equal(rows);
+      expect(await model.get({ id: 1 })).toEqual(rows);
     });
 
     it('rejects invalid input without querying the DB', async () => {
       const model = await createGetModel();
 
       for (const where of [null, 'id = 1', [], { 'id; drop table apps': 1 }, { email: { $ne: '' } }]) {
-        expect(await rejectionOf(model.get(where))).to.be.instanceOf(TypeError);
+        expect(await rejectionOf(model.get(where))).toBeInstanceOf(TypeError);
       }
-      expect(run).to.not.have.been.called;
+      expect(run).not.toHaveBeenCalled();
     });
   });
 
@@ -255,8 +271,8 @@ describe('createModel', () => {
 
     const createRangeModel = async (options = {}) => {
       const { instance } = stubbedKnex();
-      run = sinon.stub().resolves(rows);
-      sinon.stub(instance.client, 'runner').callsFake(query => {
+      run = jest.fn().mockResolvedValue(rows);
+      jest.spyOn(instance.client, 'runner').mockImplementation(query => {
         builder = query;
         return { run };
       });
@@ -266,23 +282,23 @@ describe('createModel', () => {
     it('selects configured columns with inclusive parameterised bounds and the initialised timeout', async () => {
       const model = await createRangeModel({ selectableProps: ['email'], requestTimeout: 1234 });
 
-      expect(await model.getInTimeRange(range)).to.deep.equal(rows);
-      expect(builder.toSQL().sql).to.equal(
+      expect(await model.getInTimeRange(range)).toEqual(rows);
+      expect(builder.toSQL().sql).toBe(
         'select "id", "created_at", "updated_at", "email" from "apps" where "created_at" between ? and ?'
       );
-      expect(builder.toSQL().bindings).to.deep.equal([range.from, range.to]);
-      expect(builder.toSQL().timeout).to.equal(1234);
+      expect(builder.toSQL().bindings).toEqual([range.from, range.to]);
+      expect(builder.toSQL().timeout).toBe(1234);
     });
 
     it('defaults the upper bound to database time and supports a non-null column', async () => {
       const model = await createRangeModel();
       await model.getInTimeRange({ timestamp: 'updated_at', from: range.from, withValue: 'email' });
 
-      expect(builder.toSQL().sql).to.equal(
+      expect(builder.toSQL().sql).toBe(
         'select "id", "created_at", "updated_at" from "apps" ' +
         'where "email" is not null and "updated_at" between ? and CURRENT_TIMESTAMP'
       );
-      expect(builder.toSQL().bindings).to.deep.equal([range.from]);
+      expect(builder.toSQL().bindings).toEqual([range.from]);
     });
 
     it('supports per-call selectableProps without changing the model or input', async () => {
@@ -290,20 +306,20 @@ describe('createModel', () => {
       const options = Object.freeze({ ...range, selectableProps: 'email, id' });
       await model.getInTimeRange(options);
 
-      expect(builder.toSQL().sql).to.include('select "id", "created_at", "updated_at", "email" from');
-      expect(model.selectableProps).to.deep.equal(DEFAULT_SELECTABLE_PROPS);
-      expect(options).to.deep.equal({ ...range, selectableProps: 'email, id' });
+      expect(builder.toSQL().sql).toContain('select "id", "created_at", "updated_at", "email" from');
+      expect(model.selectableProps).toEqual(DEFAULT_SELECTABLE_PROPS);
+      expect(options).toEqual({ ...range, selectableProps: 'email, id' });
       await model.getInTimeRange({ ...range, selectableProps: '*' });
-      expect(builder.toSQL().sql).to.include('select * from');
+      expect(builder.toSQL().sql).toContain('select * from');
     });
 
     it('accepts Date bounds, including equal bounds, and returns an empty result when nothing matches', async () => {
       const model = await createRangeModel();
       const date = new Date('2026-02-01T00:00:00Z');
-      run.resolves([]);
+      run.mockResolvedValue([]);
 
-      expect(await model.getInTimeRange({ ...range, from: date, to: date })).to.deep.equal([]);
-      expect(builder.toSQL().bindings).to.deep.equal([date, date]);
+      expect(await model.getInTimeRange({ ...range, from: date, to: date })).toEqual([]);
+      expect(builder.toSQL().bindings).toEqual([date, date]);
     });
 
     it('rejects invalid options, identifiers, dates and projections before querying', async () => {
@@ -318,24 +334,24 @@ describe('createModel', () => {
           .map(selectableProps => ({ ...range, selectableProps }))];
 
       for (const options of invalid) {
-        expect(await rejectionOf(model.getInTimeRange(options))).to.be.instanceOf(TypeError);
+        expect(await rejectionOf(model.getInTimeRange(options))).toBeInstanceOf(TypeError);
       }
-      expect(run).to.not.have.been.called;
-      expect(await model.getInTimeRange(range)).to.deep.equal(rows);
+      expect(run).not.toHaveBeenCalled();
+      expect(await model.getInTimeRange(range)).toEqual(rows);
     });
 
     it('rethrows database errors and timeouts, logs no values, and remains usable', async () => {
       const model = await createRangeModel();
       for (const error of [Object.assign(new Error('private value'), { code: '42703' }),
         Object.assign(new Error('query timed out'), { name: 'KnexTimeoutError' })]) {
-        run.rejects(error);
-        expect(await rejectionOf(model.getInTimeRange(range))).to.equal(error);
-        expect(logger.error.lastCall).to.have.been.calledWithExactly(
+        run.mockRejectedValue(error);
+        expect(await rejectionOf(model.getInTimeRange(range))).toBe(error);
+        expect(logger.error).toHaveBeenLastCalledWith(
           'DB time range read error', { table: 'apps', code: error.code }
         );
-        expect(JSON.stringify(logger.error.lastCall.args)).to.not.include(error.message);
-        run.resolves(rows);
-        expect(await model.getInTimeRange(range)).to.deep.equal(rows);
+        expect(JSON.stringify(logger.error.mock.lastCall)).not.toContain(error.message);
+        run.mockResolvedValue(rows);
+        expect(await model.getInTimeRange(range)).toEqual(rows);
       }
     });
   });
@@ -346,8 +362,8 @@ describe('createModel', () => {
 
     const createCountModel = async (options = {}) => {
       const { instance } = stubbedKnex();
-      run = sinon.stub().resolves([{ count: '2' }]);
-      sinon.stub(instance.client, 'runner').callsFake(query => {
+      run = jest.fn().mockResolvedValue([{ count: '2' }]);
+      jest.spyOn(instance.client, 'runner').mockImplementation(query => {
         builder = query;
         return { run };
       });
@@ -357,25 +373,25 @@ describe('createModel', () => {
     it('counts matching rows and converts the PostgreSQL count string to a number', async () => {
       const model = await createCountModel({ selectableProps: ['email'] });
 
-      expect(await model.getCount({ email: 'test@example.com' })).to.equal(2);
-      expect(builder.toSQL().sql).to.equal('select count(*) as "count" from "apps" where "email" = ?');
-      expect(builder.toSQL().bindings).to.deep.equal(['test@example.com']);
+      expect(await model.getCount({ email: 'test@example.com' })).toBe(2);
+      expect(builder.toSQL().sql).toBe('select count(*) as "count" from "apps" where "email" = ?');
+      expect(builder.toSQL().bindings).toEqual(['test@example.com']);
     });
 
     it('counts all rows when filters are omitted or empty', async () => {
       const model = await createCountModel();
 
       for (const where of [undefined, {}]) {
-        expect(await model.getCount(where)).to.equal(2);
-        expect(builder.toSQL().sql).to.equal('select count(*) as "count" from "apps"');
+        expect(await model.getCount(where)).toBe(2);
+        expect(builder.toSQL().sql).toBe('select count(*) as "count" from "apps"');
       }
     });
 
     it('returns zero when no rows match', async () => {
       const model = await createCountModel();
-      run.resolves([{ count: '0' }]);
+      run.mockResolvedValue([{ count: '0' }]);
 
-      expect(await model.getCount({ id: 1 })).to.equal(0);
+      expect(await model.getCount({ id: 1 })).toBe(0);
     });
 
     it('combines multiple criteria with AND and handles nulls without mutating filters', async () => {
@@ -383,11 +399,11 @@ describe('createModel', () => {
       const where = Object.freeze({ email: 'test@example.com', deleted_at: null });
       await model.getCount(where);
 
-      expect(builder.toSQL().sql).to.equal(
+      expect(builder.toSQL().sql).toBe(
         'select count(*) as "count" from "apps" where "email" = ? and "deleted_at" is null'
       );
-      expect(builder.toSQL().bindings).to.deep.equal(['test@example.com']);
-      expect(where).to.deep.equal({ email: 'test@example.com', deleted_at: null });
+      expect(builder.toSQL().bindings).toEqual(['test@example.com']);
+      expect(where).toEqual({ email: 'test@example.com', deleted_at: null });
     });
 
     it('binds malicious values as parameters', async () => {
@@ -395,45 +411,46 @@ describe('createModel', () => {
       const malicious = "x' OR '1'='1";
       await model.getCount({ email: malicious });
 
-      expect(builder.toSQL().sql).to.not.include(malicious);
-      expect(builder.toSQL().bindings).to.deep.equal([malicious]);
+      expect(builder.toSQL().sql).not.toContain(malicious);
+      expect(builder.toSQL().bindings).toEqual([malicious]);
     });
 
     it('uses the timeout supplied during initialisation', async () => {
       const model = await createCountModel({ requestTimeout: 1234 });
       await model.getCount();
 
-      expect(builder.toSQL().timeout).to.equal(1234);
+      expect(builder.toSQL().timeout).toBe(1234);
     });
 
     it('uses the default timeout when none is supplied', async () => {
       const model = await createCountModel();
       await model.getCount();
 
-      expect(builder.toSQL().timeout).to.equal(10000);
+      expect(builder.toSQL().timeout).toBe(10000);
     });
 
     it('logs and rethrows DB errors without logging filter values and remains usable', async () => {
       const model = await createCountModel();
       const failure = Object.assign(new Error('query failed for secret@example.com'), { code: '42703' });
-      run.onFirstCall().rejects(failure);
+      run.mockRejectedValueOnce(failure);
 
-      expect(await rejectionOf(model.getCount({ email: 'secret@example.com' }))).to.equal(failure);
-      expect(logger.error).to.have.been.calledOnceWithExactly(
+      expect(await rejectionOf(model.getCount({ email: 'secret@example.com' }))).toBe(failure);
+      expect(logger.error).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenNthCalledWith(1,
         'DB count error', { table: 'apps', columns: ['email'], code: '42703' }
       );
-      expect(JSON.stringify(logger.error.firstCall.args)).to.not.include('secret@example.com');
-      expect(await model.getCount()).to.equal(2);
+      expect(JSON.stringify(logger.error.mock.calls[0])).not.toContain('secret@example.com');
+      expect(await model.getCount()).toBe(2);
     });
 
     it('propagates timeout errors and allows subsequent queries', async () => {
       const model = await createCountModel();
       const failure = new Error('Defined query timeout of 1234ms exceeded when running query.');
       failure.name = 'KnexTimeoutError';
-      run.onFirstCall().rejects(failure);
+      run.mockRejectedValueOnce(failure);
 
-      expect(await rejectionOf(model.getCount())).to.equal(failure);
-      expect(await model.getCount()).to.equal(2);
+      expect(await rejectionOf(model.getCount())).toBe(failure);
+      expect(await model.getCount()).toBe(2);
     });
 
     it('rejects invalid input before executing a query', async () => {
@@ -446,11 +463,11 @@ describe('createModel', () => {
       ];
 
       for (const where of invalid) {
-        expect(await rejectionOf(model.getCount(where))).to.be.instanceOf(TypeError);
+        expect(await rejectionOf(model.getCount(where))).toBeInstanceOf(TypeError);
       }
-      expect(run).to.not.have.been.called;
-      expect(logger.error).to.not.have.been.called;
-      expect(await model.getCount()).to.equal(2);
+      expect(run).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(await model.getCount()).toBe(2);
     });
   });
 
@@ -461,8 +478,8 @@ describe('createModel', () => {
 
     const createPatchModel = async (options = {}, { runError } = {}) => {
       const { instance } = stubbedKnex();
-      run = runError ? sinon.stub().rejects(runError) : sinon.stub().resolves(rows);
-      sinon.stub(instance.client, 'runner').callsFake(query => {
+      run = runError ? jest.fn().mockRejectedValue(runError) : jest.fn().mockResolvedValue(rows);
+      jest.spyOn(instance.client, 'runner').mockImplementation(query => {
         builder = query;
         return { run };
       });
@@ -474,12 +491,12 @@ describe('createModel', () => {
       const result = await model.patch(1, { email: 'new@example.com' });
       const { sql, bindings } = builder.toSQL();
 
-      expect(result).to.deep.equal(rows);
-      expect(sql).to.equal(
+      expect(result).toEqual(rows);
+      expect(sql).toBe(
         'update "apps" set "email" = ?, "updated_at" = CURRENT_TIMESTAMP where "id" = ? ' +
         'returning "id", "created_at", "updated_at", "email"'
       );
-      expect(bindings).to.deep.equal(['new@example.com', 1]);
+      expect(bindings).toEqual(['new@example.com', 1]);
     });
 
     it('binds values as parameters rather than inlining them', async () => {
@@ -488,15 +505,15 @@ describe('createModel', () => {
       await model.patch('abc', { email: malicious });
       const { sql, bindings } = builder.toSQL();
 
-      expect(sql).to.not.include(malicious);
-      expect(bindings).to.deep.equal([malicious, 'abc']);
+      expect(sql).not.toContain(malicious);
+      expect(bindings).toEqual([malicious, 'abc']);
     });
 
     it('uses the request timeout', async () => {
       const model = await createPatchModel({ requestTimeout: 4321 });
       await model.patch(1, { email: 'a@b.com' });
 
-      expect(builder.toSQL().timeout).to.equal(4321);
+      expect(builder.toSQL().timeout).toBe(4321);
     });
 
     it('overrides a supplied updated_at and does not mutate the input', async () => {
@@ -504,8 +521,8 @@ describe('createModel', () => {
       const fields = { email: 'a@b.com', updated_at: 'yesterday' };
       await model.patch(1, fields);
 
-      expect(builder.toSQL().sql).to.include('"updated_at" = CURRENT_TIMESTAMP');
-      expect(fields).to.deep.equal({ email: 'a@b.com', updated_at: 'yesterday' });
+      expect(builder.toSQL().sql).toContain('"updated_at" = CURRENT_TIMESTAMP');
+      expect(fields).toEqual({ email: 'a@b.com', updated_at: 'yesterday' });
     });
 
     it('logs and rethrows query errors without logging values', async () => {
@@ -513,18 +530,19 @@ describe('createModel', () => {
       const model = await createPatchModel({}, { runError });
       const error = await rejectionOf(model.patch(1, { email: 'a@b.com' }));
 
-      expect(error.message).to.equal('query timed out');
-      expect(logger.error).to.have.been.calledOnceWithExactly(
+      expect(error.message).toBe('query timed out');
+      expect(logger.error).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenNthCalledWith(1,
         'DB update error', { table: 'apps', columns: ['email'], code: '57014' }
       );
     });
 
     it('continues to work after an error', async () => {
       const model = await createPatchModel();
-      run.onFirstCall().rejects(new Error('boom'));
+      run.mockRejectedValueOnce(new Error('boom'));
 
       await rejectionOf(model.patch(1, { email: 'a@b.com' }));
-      expect(await model.patch(1, { email: 'a@b.com' })).to.deep.equal(rows);
+      expect(await model.patch(1, { email: 'a@b.com' })).toEqual(rows);
     });
 
     it('rejects invalid input without querying the DB', async () => {
@@ -541,10 +559,10 @@ describe('createModel', () => {
       ];
 
       for (const [id, fields] of invalid) {
-        expect(await rejectionOf(model.patch(id, fields))).to.be.instanceOf(TypeError);
+        expect(await rejectionOf(model.patch(id, fields))).toBeInstanceOf(TypeError);
       }
-      expect(run).to.not.have.been.called;
-      expect(logger.error).to.not.have.been.called;
+      expect(run).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
     });
   });
 
@@ -556,8 +574,8 @@ describe('createModel', () => {
 
     const createModelForInsert = async (options = {}, { runError } = {}) => {
       ({ instance } = stubbedKnex());
-      run = runError ? sinon.stub().rejects(runError) : sinon.stub().resolves(rows);
-      sinon.stub(instance.client, 'runner').callsFake(query => {
+      run = runError ? jest.fn().mockRejectedValue(runError) : jest.fn().mockResolvedValue(rows);
+      jest.spyOn(instance.client, 'runner').mockImplementation(query => {
         builder = query;
         return { run };
       });
@@ -570,19 +588,19 @@ describe('createModel', () => {
       const result = await model.create(data);
       const { sql, bindings } = builder.toSQL();
 
-      expect(result).to.deep.equal(rows);
-      expect(sql).to.equal(
+      expect(result).toEqual(rows);
+      expect(sql).toBe(
         'insert into "apps" ("email") values (?) returning "id", "created_at", "updated_at", "email"'
       );
-      expect(bindings).to.deep.equal(['test@example.com']);
-      expect(data).to.deep.equal({ email: 'test@example.com' });
+      expect(bindings).toEqual(['test@example.com']);
+      expect(data).toEqual({ email: 'test@example.com' });
     });
 
     it('uses the request timeout', async () => {
       const model = await createModelForInsert({ requestTimeout: 1234 });
       await model.create({ email: 'test@example.com' });
 
-      expect(builder.toSQL().timeout).to.equal(1234);
+      expect(builder.toSQL().timeout).toBe(1234);
     });
 
     it('logs and rethrows query errors without logging inserted values', async () => {
@@ -590,21 +608,22 @@ describe('createModel', () => {
       const model = await createModelForInsert({}, { runError });
       const error = await rejectionOf(model.create({ email: 'sensitive@example.com' }));
 
-      expect(error.message).to.equal('insert failed');
-      expect(logger.error).to.have.been.calledOnceWithExactly(
+      expect(error.message).toBe('insert failed');
+      expect(logger.error).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenNthCalledWith(1,
         'DB create error', { table: 'apps', columns: ['email'], code: '23505' }
       );
-      expect(logger.error.firstCall.args[1]).to.not.have.property('email');
+      expect(logger.error.mock.calls[0][1]).not.toHaveProperty('email');
     });
 
     it('rejects invalid or empty data without querying the DB', async () => {
       const model = await createModelForInsert();
 
       for (const data of [{}, null, 'email', { 'email; drop table apps': 'x' }, { email: { $ne: '' } }]) {
-        expect(await rejectionOf(model.create(data))).to.be.instanceOf(TypeError);
+        expect(await rejectionOf(model.create(data))).toBeInstanceOf(TypeError);
       }
-      expect(run).to.not.have.been.called;
-      expect(logger.error).to.not.have.been.called;
+      expect(run).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
     });
   });
 
@@ -615,8 +634,8 @@ describe('createModel', () => {
 
     const createModelForDelete = async (options = {}, { runError } = {}) => {
       ({ instance } = stubbedKnex());
-      run = runError ? sinon.stub().rejects(runError) : sinon.stub().resolves(1);
-      sinon.stub(instance.client, 'runner').callsFake(query => {
+      run = runError ? jest.fn().mockRejectedValue(runError) : jest.fn().mockResolvedValue(1);
+      jest.spyOn(instance.client, 'runner').mockImplementation(query => {
         builder = query;
         return { run };
       });
@@ -628,9 +647,9 @@ describe('createModel', () => {
       const result = await model.delete(1);
       const { sql, bindings } = builder.toSQL();
 
-      expect(result).to.equal(1);
-      expect(sql).to.equal('delete from "apps" where "id" = ?');
-      expect(bindings).to.deep.equal([1]);
+      expect(result).toBe(1);
+      expect(sql).toBe('delete from "apps" where "id" = ?');
+      expect(bindings).toEqual([1]);
     });
 
     it('accepts string ids and binds them as parameters', async () => {
@@ -639,22 +658,22 @@ describe('createModel', () => {
       await model.delete(malicious);
       const { sql, bindings } = builder.toSQL();
 
-      expect(sql).to.equal('delete from "apps" where "id" = ?');
-      expect(bindings).to.deep.equal([malicious]);
+      expect(sql).toBe('delete from "apps" where "id" = ?');
+      expect(bindings).toEqual([malicious]);
     });
 
     it('returns 0 when no row matches', async () => {
       const model = await createModelForDelete();
-      run.resolves(0);
+      run.mockResolvedValue(0);
 
-      expect(await model.delete(999)).to.equal(0);
+      expect(await model.delete(999)).toBe(0);
     });
 
     it('uses the request timeout', async () => {
       const model = await createModelForDelete({ requestTimeout: 1234 });
       await model.delete(1);
 
-      expect(builder.toSQL().timeout).to.equal(1234);
+      expect(builder.toSQL().timeout).toBe(1234);
     });
 
     it('logs and rethrows query errors with the error code only', async () => {
@@ -663,28 +682,29 @@ describe('createModel', () => {
       const model = await createModelForDelete({}, { runError });
       const error = await rejectionOf(model.delete(1));
 
-      expect(error).to.equal(runError);
-      expect(logger.error).to.have.been.calledOnceWithExactly(
+      expect(error).toBe(runError);
+      expect(logger.error).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenNthCalledWith(1,
         'DB delete error', { table: 'apps', code: '57014' }
       );
     });
 
     it('continues to work after an error', async () => {
       const model = await createModelForDelete();
-      run.onFirstCall().rejects(new Error('boom'));
+      run.mockRejectedValueOnce(new Error('boom'));
 
       await rejectionOf(model.delete(1));
-      expect(await model.delete(1)).to.equal(1);
+      expect(await model.delete(1)).toBe(1);
     });
 
     it('rejects invalid ids without querying the DB', async () => {
       const model = await createModelForDelete();
 
       for (const id of [undefined, null, 0, -1, 1.5, NaN, Infinity, '', '  ', {}, [], { id: 1 }, true]) {
-        expect(await rejectionOf(model.delete(id))).to.be.instanceOf(TypeError);
+        expect(await rejectionOf(model.delete(id))).toBeInstanceOf(TypeError);
       }
-      expect(run).to.not.have.been.called;
-      expect(logger.error).to.not.have.been.called;
+      expect(run).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
     });
   });
 
@@ -693,67 +713,9 @@ describe('createModel', () => {
       const instance = knex(knexConfig);
       instances.push(instance);
 
-      expect(await rejectionOf(createModel({ knexConfig, tableName: 'apps' }))).to.be.instanceOf(TypeError);
-      expect(await rejectionOf(createModel({ knex: instance, tableName: 'apps' }))).to.be.instanceOf(TypeError);
-      expect(await rejectionOf(createModel({ knex: instance, knexConfig }))).to.be.instanceOf(TypeError);
+      expect(await rejectionOf(createModel({ knexConfig, tableName: 'apps' }))).toBeInstanceOf(TypeError);
+      expect(await rejectionOf(createModel({ knex: instance, tableName: 'apps' }))).toBeInstanceOf(TypeError);
+      expect(await rejectionOf(createModel({ knex: instance, knexConfig }))).toBeInstanceOf(TypeError);
     });
-  });
-});
-
-describe('validateColumnValues', () => {
-  it('returns a copy of a valid where object', () => {
-    const date = new Date();
-    const where = { email: 'test@example.com', id: 1, active: true, deleted_at: null, created_at: date };
-    const result = validateColumnValues(where);
-
-    expect(result).to.deep.equal(where);
-    expect(result).to.not.equal(where);
-  });
-
-  it('accepts objects parsed from JSON and with a null prototype', () => {
-    expect(validateColumnValues(JSON.parse('{"id":1}'))).to.deep.equal({ id: 1 });
-    expect(validateColumnValues(Object.assign(Object.create(null), { id: 1 }))).to.deep.equal({ id: 1 });
-  });
-
-  it('rejects non plain objects', () => {
-    for (const where of [undefined, null, 'id', 1, [], new Date(), new Map()]) {
-      expect(() => validateColumnValues(where)).to.throw(TypeError, 'input must be a plain object');
-    }
-  });
-
-  it('rejects invalid column names', () => {
-    for (const column of ['', '1id', 'id;', 'id = 1', 'a.b', '"id"', 'id--']) {
-      expect(() => validateColumnValues({ [column]: 1 })).to.throw(TypeError, 'Invalid column name');
-    }
-  });
-
-  it('rejects unsupported values', () => {
-    for (const value of [undefined, {}, [1], () => { }, NaN, Infinity, new Date('x'), Symbol('s'), 1n]) {
-      expect(() => validateColumnValues({ id: value })).to.throw(TypeError, 'Invalid value for column "id"');
-    }
-  });
-  it('rejects empty objects when requireNonEmpty is true', () => {
-    expect(() => validateColumnValues({}, true)).to.throw(TypeError, 'input must contain at least one column');
-  });
-});
-
-describe('defineSelectableProps', () => {
-  it('appends props to the defaults without duplicates', () => {
-    expect(defineSelectableProps(['email'])).to.deep.equal([...DEFAULT_SELECTABLE_PROPS, 'email']);
-    expect(defineSelectableProps(['id', 'email'])).to.deep.equal([...DEFAULT_SELECTABLE_PROPS, 'email']);
-  });
-
-  it('returns the defaults when no props are given', () => {
-    expect(defineSelectableProps()).to.deep.equal(DEFAULT_SELECTABLE_PROPS);
-    expect(defineSelectableProps([])).to.deep.equal(DEFAULT_SELECTABLE_PROPS);
-  });
-
-  it('returns * on its own', () => {
-    expect(defineSelectableProps(['*'])).to.deep.equal(['*']);
-  });
-
-  it('does not mutate the defaults', () => {
-    defineSelectableProps().push('email');
-    expect(DEFAULT_SELECTABLE_PROPS).to.deep.equal(['id', 'created_at', 'updated_at']);
   });
 });
