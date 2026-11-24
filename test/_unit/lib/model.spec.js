@@ -471,6 +471,127 @@ describe('createModel', () => {
     });
   });
 
+  describe('getMetrics', () => {
+    const sizes = { table_size: '16 kB', database_name: 'test_db', database_size: '7 MB' };
+    let run;
+    let builders;
+
+    const createMetricsModel = async (options = {}) => {
+      const { instance } = stubbedKnex();
+      run = jest.fn(query => Promise.resolve(query._method === 'first' ? sizes : [{ count: '2' }]));
+      builders = [];
+      jest.spyOn(instance.client, 'runner').mockImplementation(query => {
+        builders.push(query);
+        return { run: () => run(query) };
+      });
+      const model = await createModel({ knex: instance, knexConfig, tableName: 'apps', logger, ...options });
+      // The connection check stubs knex.raw; metrics need the real one to build its function calls.
+      rawRestorers.forEach(restore => restore());
+      return model;
+    };
+    const sqlOf = () => builders.map(builder => builder.toSQL());
+
+    it('returns table and database metrics with the row count as a number', async () => {
+      const model = await createMetricsModel({ selectableProps: ['email'] });
+
+      expect(await model.getMetrics()).toEqual({
+        table_name: 'apps', table_size: '16 kB', database_name: 'test_db', database_size: '7 MB', row_count: 2
+      });
+    });
+
+    it('builds parameterised queries for the sizes and the count', async () => {
+      const model = await createMetricsModel();
+      await model.getMetrics({ email: 'test@example.com', deleted_at: null });
+      const [metrics, count] = sqlOf();
+
+      expect(metrics.sql).toBe(
+        'select pg_size_pretty(pg_total_relation_size("relid")) as "table_size", ' +
+        'current_database() as "database_name", ' +
+        'pg_size_pretty(pg_database_size(current_database())) as "database_size" ' +
+        'from "pg_catalog"."pg_stat_user_tables" where "relname" = ? and "schemaname" = current_schema() limit ?'
+      );
+      expect(metrics.bindings).toEqual(['apps', 1]);
+      expect(count.sql).toBe('select count(*) as "count" from "apps" where "email" = ? and "deleted_at" is null');
+      expect(count.bindings).toEqual(['test@example.com']);
+    });
+
+    it('counts all rows when filters are omitted or empty', async () => {
+      const model = await createMetricsModel();
+
+      for (const where of [undefined, {}]) {
+        builders = [];
+        await model.getMetrics(where);
+        expect(sqlOf()[1].sql).toBe('select count(*) as "count" from "apps"');
+      }
+    });
+
+    it('binds malicious values as parameters without mutating filters', async () => {
+      const model = await createMetricsModel();
+      const where = Object.freeze({ email: "x' OR '1'='1" });
+      await model.getMetrics(where);
+
+      expect(sqlOf()[1].sql).not.toContain(where.email);
+      expect(sqlOf()[1].bindings).toEqual([where.email]);
+      expect(where).toEqual({ email: "x' OR '1'='1" });
+    });
+
+    it('uses the timeout supplied during initialisation for every query', async () => {
+      const model = await createMetricsModel({ requestTimeout: 1234 });
+      await model.getMetrics();
+
+      expect(sqlOf().map(({ timeout }) => timeout)).toEqual([1234, 1234]);
+    });
+
+    it('uses the default timeout when none is supplied', async () => {
+      const model = await createMetricsModel();
+      await model.getMetrics();
+
+      expect(sqlOf().map(({ timeout }) => timeout)).toEqual([10000, 10000]);
+    });
+
+    it('logs and rethrows DB errors and timeouts without values and remains usable', async () => {
+      const model = await createMetricsModel();
+      const failures = [
+        Object.assign(new Error('query failed for secret@example.com'), { code: '42703' }),
+        Object.assign(new Error('Defined query timeout of 10000ms exceeded'), { name: 'KnexTimeoutError' })
+      ];
+
+      for (const failure of failures) {
+        run.mockRejectedValueOnce(failure);
+        expect(await rejectionOf(model.getMetrics({ email: 'secret@example.com' }))).toBe(failure);
+        expect(logger.error).toHaveBeenLastCalledWith(
+          'DB metrics error', { table: 'apps', columns: ['email'], code: failure.code }
+        );
+        expect(JSON.stringify(logger.error.mock.lastCall)).not.toContain('secret@example.com');
+        expect((await model.getMetrics()).row_count).toBe(2);
+      }
+    });
+
+    it('rejects when the table has no metrics', async () => {
+      const model = await createMetricsModel();
+      run.mockImplementation(query => Promise.resolve(query._method === 'first' ? undefined : [{ count: '2' }]));
+
+      const error = await rejectionOf(model.getMetrics());
+      expect(error.message).toBe('Metrics for table "apps" not found');
+      expectFirstCallStartsWith(logger.error, 'DB metrics error');
+    });
+
+    it('rejects invalid input before executing a query', async () => {
+      const model = await createMetricsModel();
+      const invalid = [
+        null, 'id = 1', [], 42, true, new Date(),
+        { 'id; drop table apps': 1 }, { email: { $ne: '' } },
+        { email: undefined }, { id: NaN }, { created_at: new Date('invalid') }
+      ];
+
+      for (const where of invalid) {
+        expect(await rejectionOf(model.getMetrics(where))).toBeInstanceOf(TypeError);
+      }
+      expect(run).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+  });
+
   describe('patch', () => {
     const rows = [{ id: 1, email: 'new@example.com' }];
     let run;

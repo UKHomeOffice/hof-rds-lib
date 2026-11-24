@@ -449,6 +449,79 @@ describe('createModel with a real knex connection', () => {
       });
     });
 
+    describe('getMetrics', () => {
+      let model;
+      const prettySize = /^\d+ (bytes|kB|MB|GB|TB)$/;
+
+      beforeEach(async () => {
+        model = await createModel({ knex, knexConfig: dbConfig, tableName, requestTimeout: 2000, logger });
+        instances.push(model.knex);
+      });
+
+      it('returns the table and database sizes and the total row count', async () => {
+        const metrics = await model.getMetrics();
+
+        expect(metrics).toEqual({
+          table_name: tableName,
+          table_size: expect.stringMatching(prettySize),
+          database_name: dbName,
+          database_size: expect.stringMatching(prettySize),
+          row_count: await model.getCount()
+        });
+      });
+
+      it('counts only rows matching the filters', async () => {
+        const email = 'metrics-filter@example.com';
+        const [created] = await model.create({ email });
+        await model.create({ email });
+
+        expect((await model.getMetrics({ email })).row_count).toBe(2);
+        expect((await model.getMetrics({ email, id: created.id })).row_count).toBe(1);
+        expect((await model.getMetrics({ email: "' OR '1'='1" })).row_count).toBe(0);
+      });
+
+      it('rejects invalid input, then permits subsequent reads', async () => {
+        for (const where of [null, [], 'id = 1', { 'email; DROP TABLE apps': 'x' }, { email: {} }]) {
+          expect(await rejectionOf(model.getMetrics(where))).toBeInstanceOf(TypeError);
+        }
+        expect(logger.error).not.toHaveBeenCalled();
+        expect((await model.getMetrics()).table_name).toBe(tableName);
+      });
+
+      it('returns DB errors to the caller without logging values and remains usable', async () => {
+        const error = await rejectionOf(model.getMetrics({ missing_metrics_column: 'private-value' }));
+
+        expect(error.code).toBe('42703');
+        expect(logger.error).toHaveBeenCalledTimes(1);
+        expect(logger.error).toHaveBeenNthCalledWith(1,
+          'DB metrics error', { table: tableName, columns: ['missing_metrics_column'], code: '42703' }
+        );
+        expect(JSON.stringify(logger.error.mock.calls[0])).not.toContain('private-value');
+        expect((await model.getMetrics({ id: 2147483647 })).row_count).toBe(0);
+      });
+
+      it('uses the initialised timeout for blocked metrics and recovers afterwards', async () => {
+        const shortTimeoutModel = await createModel({
+          knex, knexConfig: dbConfig, tableName, requestTimeout: 200, logger
+        });
+        instances.push(shortTimeoutModel.knex);
+        const transaction = await setup.transaction();
+
+        try {
+          await transaction.schema.alterTable(tableName, table => table.boolean('metrics_lock'));
+          const error = await rejectionOf(shortTimeoutModel.getMetrics());
+
+          expect(error.name).toBe('KnexTimeoutError');
+          expect(error.message).toContain('200ms');
+          expectFirstCallStartsWith(logger.error, 'DB metrics error');
+        } finally {
+          await transaction.rollback();
+        }
+
+        expect((await shortTimeoutModel.getMetrics({ id: 2147483647 })).row_count).toBe(0);
+      });
+    });
+
     it('patches only the row with the given id and refreshes updated_at', async () => {
       const model = await createModel({ knex, knexConfig: dbConfig, tableName, selectableProps: ['email'], logger });
       instances.push(model.knex);
