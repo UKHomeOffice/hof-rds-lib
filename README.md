@@ -130,6 +130,42 @@ try {
 - `where` must be a plain object with valid column-name keys (`[A-Za-z_][A-Za-z0-9_]*`). Values must be strings, finite numbers, booleans, valid `Date` objects or `null`. Invalid input rejects with a `TypeError` before querying the DB; inputs are not mutated.
 - DB errors and timeouts are rethrown to the caller. Logging includes only the table, filtered column names and error code, not filter values or potentially sensitive DB error messages. The model remains usable after an error.
 
+### `model.getMetrics(where)`
+
+Async. Returns size metrics for the model's table and its database, plus the number of rows matching `where`. This replaces the `hof-rds-api` metrics endpoint and returns the same shape. Both queries use the `requestTimeout` supplied when the model was initialised (default `10000` ms) and run in parallel.
+
+| Field | Description |
+| --- | --- |
+| `table_name` | the model's table |
+| `table_size` | total size of the table including indexes and TOAST data, human readable (e.g. `'48 kB'`) |
+| `database_name` | the connected database |
+| `database_size` | total size of the database, human readable (e.g. `'7621 kB'`) |
+| `row_count` | number of rows matching `where` (all rows when omitted), as a number |
+
+```js
+const metrics = await model.getMetrics();
+// {
+//   table_name: 'saved_applications',
+//   table_size: '48 kB',
+//   database_name: 'hof',
+//   database_size: '7621 kB',
+//   row_count: 12
+// }
+
+try {
+  const { row_count } = await model.getMetrics({ email: 'test@example.com' });
+  console.log(row_count); // rows for that email only
+} catch (error) {
+  console.error(error.message);
+  // Invalid input, DB errors and timeouts reject; subsequent calls can still be made.
+}
+```
+
+- PostgreSQL only. Sizes come from `pg_size_pretty`, `pg_total_relation_size` and `pg_database_size`, read from `pg_catalog.pg_stat_user_tables` for the table in the current schema.
+- Uses the knex query builder (`first`, `where`, `count`) rather than raw SQL statements. knex has no builder for PostgreSQL functions, so those function calls are fixed `knex.raw` fragments containing no caller input; the table name and filter values are always bound as parameters.
+- `where` is validated like `getCount`: a plain object with valid column-name keys (`[A-Za-z_][A-Za-z0-9_]*`) and string, finite number, boolean, valid `Date` or `null` values. Invalid input rejects with a `TypeError` before querying the DB; inputs are not mutated.
+- DB errors and timeouts are rethrown to the caller. If the table's metrics cannot be found, it rejects with an `Error`. Logging includes only the table, filtered column names and error code, never filter values. The model remains usable after an error.
+
 ### `model.patch(id, fields)`
 
 Async. Updates the row whose `id` matches, setting each column in `fields` and refreshing `updated_at`. Resolves with an array of the updated rows (only the model's `selectableProps`), which is empty if no row matched. The query uses the model's `requestTimeout`.

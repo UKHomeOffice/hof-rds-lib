@@ -1,5 +1,4 @@
-import { expect } from 'chai';
-import sinon from 'sinon';
+import { expect, jest } from '@jest/globals';
 import knex from 'knex';
 import { createServer } from 'node:net';
 import {
@@ -13,6 +12,10 @@ import createModel from '../../lib/model.js';
 import loggerFactory from '../../lib/logger.js';
 
 describe('createModel with a real knex connection', () => {
+  const expectFirstCallStartsWith = (mock, ...args) => {
+    expect(mock).toHaveBeenCalledTimes(1);
+    expect(mock.mock.calls[0].slice(0, args.length)).toEqual(args);
+  };
   let instances;
   let logger;
 
@@ -21,13 +24,13 @@ describe('createModel with a real knex connection', () => {
   beforeEach(() => {
     instances = [];
     logger = loggerFactory();
-    sinon.spy(logger, 'info');
-    sinon.spy(logger, 'warn');
-    sinon.spy(logger, 'error');
+    jest.spyOn(logger, 'info');
+    jest.spyOn(logger, 'warn');
+    jest.spyOn(logger, 'error');
   });
 
   afterEach(async () => {
-    sinon.restore();
+    jest.restoreAllMocks();
     await Promise.all(instances.map(instance => instance.destroy()));
   });
 
@@ -47,12 +50,12 @@ describe('createModel with a real knex connection', () => {
       createModel({ knex, knexConfig, tableName: 'apps', requestTimeout: 2000, logger })
     );
 
-    expect(error).to.be.instanceOf(Error);
-    expect(error.message).to.match(/ECONNREFUSED/);
-    expect(logger.info).to.have.been.calledOnceWith('Attempting DB connection');
-    expect(logger.error).to.have.been.calledOnceWith('DB connection error');
-    expect(logger.error.firstCall.args[1]).to.include({ database: 'unreachable', table: 'apps' });
-    expect(logger.error.firstCall.args[1].error).to.match(/ECONNREFUSED/);
+    expect(error.name).toBe('Error');
+    expect(error.message).toMatch(/ECONNREFUSED/);
+    expectFirstCallStartsWith(logger.info, 'Attempting DB connection');
+    expectFirstCallStartsWith(logger.error, 'DB connection error');
+    expect(logger.error.mock.calls[0][1]).toMatchObject({ database: 'unreachable', table: 'apps' });
+    expect(logger.error.mock.calls[0][1].error).toMatch(/ECONNREFUSED/);
   });
 
   describe('against a database', function () {
@@ -132,8 +135,7 @@ describe('createModel with a real knex connection', () => {
       );
     };
 
-    before(async function () {
-      this.timeout(120000);
+    beforeAll(async () => {
       const rdsPortReservation = await reserveHostPort();
       try {
         ministack = await new GenericContainer('ministackorg/ministack:1.5.30')
@@ -196,10 +198,9 @@ describe('createModel with a real knex connection', () => {
         table.timestamps(true, true);
         table.string('email');
       });
-    });
+    }, 120000);
 
-    after(async function () {
-      this.timeout(60000);
+    afterAll(async () => {
       try {
         await setup?.destroy();
       } finally {
@@ -215,16 +216,16 @@ describe('createModel with a real knex connection', () => {
           await ministack?.stop();
         }
       }
-    });
+    }, 60000);
 
     it('connects to the DB and table', async () => {
       const model = await createModel({ knex, knexConfig: dbConfig, tableName, logger });
       instances.push(model.knex);
 
-      expect(model.tableName).to.equal(tableName);
-      expect(logger.info).to.have.been.calledTwice;
-      expect(logger.info.secondCall.args[0]).to.equal('DB connection successful');
-      expect(logger.info.secondCall.args[1]).to.include({ database: dbConfig.connection.database, table: tableName });
+      expect(model.tableName).toBe(tableName);
+      expect(logger.info).toHaveBeenCalledTimes(2);
+      expect(logger.info.mock.calls[1][0]).toBe('DB connection successful');
+      expect(logger.info.mock.calls[1][1]).toMatchObject({ database: dbConfig.connection.database, table: tableName });
     });
 
     it('creates a row and retrieves it with the supplied filter', async () => {
@@ -235,10 +236,10 @@ describe('createModel with a real knex connection', () => {
       const [created] = await model.create({ email });
       const rows = await model.get({ email });
 
-      expect(created).to.include({ email });
-      expect(created.id).to.be.a('number');
-      expect(rows).to.have.lengthOf(1);
-      expect(rows[0]).to.deep.equal(created);
+      expect(created).toMatchObject({ email });
+      expect(created.id).toEqual(expect.any(Number));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual(created);
     });
 
     it('retrieves null values and returns no rows for an unmatched filter', async () => {
@@ -247,8 +248,8 @@ describe('createModel with a real knex connection', () => {
 
       const [created] = await model.create({ email: null });
 
-      expect(await model.get({ email: null })).to.deep.equal([created]);
-      expect(await model.get({ email: 'missing@example.com' })).to.deep.equal([]);
+      expect(await model.get({ email: null })).toEqual([created]);
+      expect(await model.get({ email: 'missing@example.com' })).toEqual([]);
     });
 
     describe('getInTimeRange', () => {
@@ -272,11 +273,11 @@ describe('createModel with a real knex connection', () => {
         })));
         try {
           const rows = await model.getInTimeRange(range);
-          expect(rows.map(row => row.id)).to.have.members(created.slice(1, 4).map(([row]) => row.id));
-          expect(rows[0]).to.have.all.keys('id', 'created_at', 'updated_at', 'email');
-          expect(await model.getInTimeRange({ ...range, from: range.to })).to.deep.equal(created[3]);
+          expect(rows.map(row => row.id).sort()).toEqual(created.slice(1, 4).map(([row]) => row.id).sort());
+          expect(Object.keys(rows[0]).sort()).toEqual(['created_at', 'email', 'id', 'updated_at']);
+          expect(await model.getInTimeRange({ ...range, from: range.to })).toEqual(created[3]);
           expect(await model.getInTimeRange({ ...range, from: '2001-02-04', to: '2001-02-04' }))
-            .to.deep.equal([]);
+            .toEqual([]);
         } finally {
           await Promise.all(created.map(([row]) => model.delete(row.id)));
         }
@@ -287,10 +288,10 @@ describe('createModel with a real knex connection', () => {
         const [absent] = await model.create({ email: null, created_at: range.from });
         try {
           const rows = await model.getInTimeRange({ ...range, withValue: 'email', selectableProps: 'email' });
-          expect(rows).to.deep.equal([present]);
+          expect(rows).toEqual([present]);
           const defaults = await createModel({ knex: model.knex, knexConfig: dbConfig, tableName, logger });
-          expect((await defaults.getInTimeRange({ ...range, selectableProps: '*' }))[0]).to.have.property('email');
-          expect((await defaults.getInTimeRange(range))[0]).to.not.have.property('email');
+          expect((await defaults.getInTimeRange({ ...range, selectableProps: '*' }))[0]).toHaveProperty('email');
+          expect((await defaults.getInTimeRange(range))[0]).not.toHaveProperty('email');
         } finally {
           await model.delete(present.id);
           await model.delete(absent.id);
@@ -305,7 +306,8 @@ describe('createModel with a real knex connection', () => {
         });
         try {
           const rows = await model.getInTimeRange({ timestamp: 'created_at', from });
-          expect(rows.map(row => row.id)).to.include(past.id).and.not.include(future.id);
+          expect(rows.map(row => row.id)).toContain(past.id);
+          expect(rows.map(row => row.id)).not.toContain(future.id);
         } finally {
           await model.delete(past.id);
           await model.delete(future.id);
@@ -321,10 +323,10 @@ describe('createModel with a real knex connection', () => {
           { ...range, selectableProps: 'email, pg_sleep(10)' }];
 
         for (const options of invalid) {
-          expect(await rejectionOf(model.getInTimeRange(options))).to.be.instanceOf(TypeError);
+          expect(await rejectionOf(model.getInTimeRange(options))).toBeInstanceOf(TypeError);
         }
-        expect(logger.error).to.not.have.been.called;
-        expect(await model.getInTimeRange(range)).to.deep.equal([]);
+        expect(logger.error).not.toHaveBeenCalled();
+        expect(await model.getInTimeRange(range)).toEqual([]);
       });
 
       it('returns DB errors to the caller, logs only metadata and remains usable', async () => {
@@ -332,12 +334,12 @@ describe('createModel with a real knex connection', () => {
           { ...range, withValue: 'missing_range_column' }, { ...range, selectableProps: 'missing_range_column' }]) {
           const error = await rejectionOf(model.getInTimeRange(options));
 
-          expect(error.code).to.equal('42703');
-          expect(error.message).to.include('missing_range_column');
-          expect(logger.error.lastCall).to.have.been.calledWithExactly(
+          expect(error.code).toBe('42703');
+          expect(error.message).toContain('missing_range_column');
+          expect(logger.error).toHaveBeenLastCalledWith(
             'DB time range read error', { table: tableName, code: '42703' }
           );
-          expect(await model.getInTimeRange(range)).to.deep.equal([]);
+          expect(await model.getInTimeRange(range)).toEqual([]);
         }
       });
 
@@ -352,14 +354,15 @@ describe('createModel with a real knex connection', () => {
           await transaction.schema.alterTable(tableName, table => table.boolean('range_lock'));
           const error = await rejectionOf(shortTimeoutModel.getInTimeRange(range));
 
-          expect(error.name).to.equal('KnexTimeoutError');
-          expect(error.message).to.include('200ms');
-          expect(logger.error).to.have.been.calledOnceWith('DB time range read error');
+          expect(error.name).toBe('KnexTimeoutError');
+          expect(error.message).toContain('200ms');
+          expect(logger.error).toHaveBeenCalledTimes(1);
+          expect(logger.error.mock.calls[0][0]).toBe('DB time range read error');
         } finally {
           await transaction.rollback();
         }
 
-        expect(await shortTimeoutModel.getInTimeRange(range)).to.deep.equal([]);
+        expect(await shortTimeoutModel.getInTimeRange(range)).toEqual([]);
       });
     });
 
@@ -373,13 +376,13 @@ describe('createModel with a real knex connection', () => {
 
       it('counts all rows and reflects inserts and deletes', async () => {
         const initialCount = (await model.get()).length;
-        expect(await model.getCount()).to.equal(initialCount);
+        expect(await model.getCount()).toBe(initialCount);
 
         const [created] = await model.create({ email: 'count-total@example.com' });
-        expect(await model.getCount({})).to.equal(initialCount + 1);
+        expect(await model.getCount({})).toBe(initialCount + 1);
 
         await model.delete(created.id);
-        expect(await model.getCount()).to.equal(initialCount);
+        expect(await model.getCount()).toBe(initialCount);
       });
 
       it('counts matching rows, combines filters and returns zero for no matches', async () => {
@@ -387,40 +390,41 @@ describe('createModel with a real knex connection', () => {
         const [created] = await model.create({ email });
         await model.create({ email });
 
-        expect(await model.getCount({ email })).to.equal(2);
-        expect(await model.getCount({ email, id: created.id })).to.equal(1);
-        expect(await model.getCount({ email: 'count-missing@example.com' })).to.equal(0);
+        expect(await model.getCount({ email })).toBe(2);
+        expect(await model.getCount({ email, id: created.id })).toBe(1);
+        expect(await model.getCount({ email: 'count-missing@example.com' })).toBe(0);
       });
 
       it('counts null values using IS NULL', async () => {
         const [created] = await model.create({ email: null });
 
-        expect(await model.getCount({ id: created.id, email: null })).to.equal(1);
+        expect(await model.getCount({ id: created.id, email: null })).toBe(1);
       });
 
       it('treats injection-like values as data and rejects invalid input', async () => {
         const email = "count'; DROP TABLE hof_rds_lib_test; --";
         await model.create({ email });
 
-        expect(await model.getCount({ email })).to.equal(1);
-        expect(await model.getCount({ email: "' OR '1'='1" })).to.equal(0);
+        expect(await model.getCount({ email })).toBe(1);
+        expect(await model.getCount({ email: "' OR '1'='1" })).toBe(0);
         for (const where of [null, [], 'id = 1', { 'email; DROP TABLE apps': 'x' }, { email: {} }]) {
-          expect(await rejectionOf(model.getCount(where))).to.be.instanceOf(TypeError);
+          expect(await rejectionOf(model.getCount(where))).toBeInstanceOf(TypeError);
         }
-        expect(logger.error).to.not.have.been.called;
-        expect(await model.getCount({ email })).to.equal(1);
+        expect(logger.error).not.toHaveBeenCalled();
+        expect(await model.getCount({ email })).toBe(1);
       });
 
       it('returns DB errors to the caller without logging values and remains usable', async () => {
         const error = await rejectionOf(model.getCount({ missing_count_column: 'private-value' }));
 
-        expect(error.code).to.equal('42703');
-        expect(error.message).to.include('missing_count_column');
-        expect(logger.error).to.have.been.calledOnceWithExactly(
+        expect(error.code).toBe('42703');
+        expect(error.message).toContain('missing_count_column');
+        expect(logger.error).toHaveBeenCalledTimes(1);
+        expect(logger.error).toHaveBeenNthCalledWith(1,
           'DB count error', { table: tableName, columns: ['missing_count_column'], code: '42703' }
         );
-        expect(JSON.stringify(logger.error.firstCall.args)).to.not.include('private-value');
-        expect(await model.getCount({ id: 2147483647 })).to.equal(0);
+        expect(JSON.stringify(logger.error.mock.calls[0])).not.toContain('private-value');
+        expect(await model.getCount({ id: 2147483647 })).toBe(0);
       });
 
       it('uses the initialised timeout for a blocked count and recovers afterwards', async () => {
@@ -434,14 +438,87 @@ describe('createModel with a real knex connection', () => {
           await transaction.schema.alterTable(tableName, table => table.boolean('count_lock'));
           const error = await rejectionOf(shortTimeoutModel.getCount());
 
-          expect(error.name).to.equal('KnexTimeoutError');
-          expect(error.message).to.include('200ms');
-          expect(logger.error).to.have.been.calledOnceWith('DB count error');
+          expect(error.name).toBe('KnexTimeoutError');
+          expect(error.message).toContain('200ms');
+          expectFirstCallStartsWith(logger.error, 'DB count error');
         } finally {
           await transaction.rollback();
         }
 
-        expect(await shortTimeoutModel.getCount({ id: 2147483647 })).to.equal(0);
+        expect(await shortTimeoutModel.getCount({ id: 2147483647 })).toBe(0);
+      });
+    });
+
+    describe('getMetrics', () => {
+      let model;
+      const prettySize = /^\d+ (bytes|kB|MB|GB|TB)$/;
+
+      beforeEach(async () => {
+        model = await createModel({ knex, knexConfig: dbConfig, tableName, requestTimeout: 2000, logger });
+        instances.push(model.knex);
+      });
+
+      it('returns the table and database sizes and the total row count', async () => {
+        const metrics = await model.getMetrics();
+
+        expect(metrics).toEqual({
+          table_name: tableName,
+          table_size: expect.stringMatching(prettySize),
+          database_name: dbName,
+          database_size: expect.stringMatching(prettySize),
+          row_count: await model.getCount()
+        });
+      });
+
+      it('counts only rows matching the filters', async () => {
+        const email = 'metrics-filter@example.com';
+        const [created] = await model.create({ email });
+        await model.create({ email });
+
+        expect((await model.getMetrics({ email })).row_count).toBe(2);
+        expect((await model.getMetrics({ email, id: created.id })).row_count).toBe(1);
+        expect((await model.getMetrics({ email: "' OR '1'='1" })).row_count).toBe(0);
+      });
+
+      it('rejects invalid input, then permits subsequent reads', async () => {
+        for (const where of [null, [], 'id = 1', { 'email; DROP TABLE apps': 'x' }, { email: {} }]) {
+          expect(await rejectionOf(model.getMetrics(where))).toBeInstanceOf(TypeError);
+        }
+        expect(logger.error).not.toHaveBeenCalled();
+        expect((await model.getMetrics()).table_name).toBe(tableName);
+      });
+
+      it('returns DB errors to the caller without logging values and remains usable', async () => {
+        const error = await rejectionOf(model.getMetrics({ missing_metrics_column: 'private-value' }));
+
+        expect(error.code).toBe('42703');
+        expect(logger.error).toHaveBeenCalledTimes(1);
+        expect(logger.error).toHaveBeenNthCalledWith(1,
+          'DB metrics error', { table: tableName, columns: ['missing_metrics_column'], code: '42703' }
+        );
+        expect(JSON.stringify(logger.error.mock.calls[0])).not.toContain('private-value');
+        expect((await model.getMetrics({ id: 2147483647 })).row_count).toBe(0);
+      });
+
+      it('uses the initialised timeout for blocked metrics and recovers afterwards', async () => {
+        const shortTimeoutModel = await createModel({
+          knex, knexConfig: dbConfig, tableName, requestTimeout: 200, logger
+        });
+        instances.push(shortTimeoutModel.knex);
+        const transaction = await setup.transaction();
+
+        try {
+          await transaction.schema.alterTable(tableName, table => table.boolean('metrics_lock'));
+          const error = await rejectionOf(shortTimeoutModel.getMetrics());
+
+          expect(error.name).toBe('KnexTimeoutError');
+          expect(error.message).toContain('200ms');
+          expectFirstCallStartsWith(logger.error, 'DB metrics error');
+        } finally {
+          await transaction.rollback();
+        }
+
+        expect((await shortTimeoutModel.getMetrics({ id: 2147483647 })).row_count).toBe(0);
       });
     });
 
@@ -453,27 +530,27 @@ describe('createModel with a real knex connection', () => {
       const [toKeep] = await model.create({ email: 'untouched@example.com' });
       const [patched] = await model.patch(toPatch.id, { email: 'after@example.com' });
 
-      expect(patched).to.include({ id: toPatch.id, email: 'after@example.com' });
-      expect(new Date(patched.updated_at).getTime()).to.be.at.least(new Date(toPatch.updated_at).getTime());
-      expect(await model.get({ id: toPatch.id })).to.deep.equal([patched]);
-      expect(await model.get({ id: toKeep.id })).to.deep.equal([toKeep]);
+      expect(patched).toMatchObject({ id: toPatch.id, email: 'after@example.com' });
+      expect(new Date(patched.updated_at).getTime()).toBeGreaterThanOrEqual(new Date(toPatch.updated_at).getTime());
+      expect(await model.get({ id: toPatch.id })).toEqual([patched]);
+      expect(await model.get({ id: toKeep.id })).toEqual([toKeep]);
     });
 
     it('returns an empty array when patching an id that does not exist', async () => {
       const model = await createModel({ knex, knexConfig: dbConfig, tableName, logger });
       instances.push(model.knex);
 
-      expect(await model.patch(2147483647, { email: 'nobody@example.com' })).to.deep.equal([]);
+      expect(await model.patch(2147483647, { email: 'nobody@example.com' })).toEqual([]);
     });
 
     it('rejects invalid patch input without logging a DB error', async () => {
       const model = await createModel({ knex, knexConfig: dbConfig, tableName, logger });
       instances.push(model.knex);
 
-      expect(await rejectionOf(model.patch(1, {}))).to.be.instanceOf(TypeError);
-      expect(await rejectionOf(model.patch(1, { 'email; drop table x': 'a' }))).to.be.instanceOf(TypeError);
-      expect(await rejectionOf(model.patch({ $ne: 1 }, { email: 'a@b.com' }))).to.be.instanceOf(TypeError);
-      expect(logger.error).to.not.have.been.called;
+      expect(await rejectionOf(model.patch(1, {}))).toBeInstanceOf(TypeError);
+      expect(await rejectionOf(model.patch(1, { 'email; drop table x': 'a' }))).toBeInstanceOf(TypeError);
+      expect(await rejectionOf(model.patch({ $ne: 1 }, { email: 'a@b.com' }))).toBeInstanceOf(TypeError);
+      expect(logger.error).not.toHaveBeenCalled();
     });
 
     it('logs and rethrows DB errors on patch without logging values and remains usable', async () => {
@@ -483,15 +560,15 @@ describe('createModel with a real knex connection', () => {
       // A non-numeric string passes input validation but is rejected by the integer id column.
       const error = await rejectionOf(model.patch('not-a-number', { email: 'secret@example.com' }));
 
-      expect(error.message).to.match(/invalid input syntax for type integer/);
-      expect(logger.error).to.have.been.calledOnceWith('DB update error');
-      expect(logger.error.firstCall.args[1]).to.include({ table: tableName });
-      expect(logger.error.firstCall.args[1].columns).to.deep.equal(['email']);
-      expect(JSON.stringify(logger.error.firstCall.args)).to.not.include('secret@example.com');
+      expect(error.message).toMatch(/invalid input syntax for type integer/);
+      expectFirstCallStartsWith(logger.error, 'DB update error');
+      expect(logger.error.mock.calls[0][1]).toMatchObject({ table: tableName });
+      expect(logger.error.mock.calls[0][1].columns).toEqual(['email']);
+      expect(JSON.stringify(logger.error.mock.calls[0])).not.toContain('secret@example.com');
 
       const [created] = await model.create({ email: 'after-patch-error@example.com' });
       const [patched] = await model.patch(created.id, { email: 'recovered@example.com' });
-      expect(patched.email).to.equal('recovered@example.com');
+      expect(patched.email).toBe('recovered@example.com');
     });
 
     it('deletes only the row with the given id', async () => {
@@ -501,16 +578,16 @@ describe('createModel with a real knex connection', () => {
       const [toDelete] = await model.create({ email: 'delete-me@example.com' });
       const [toKeep] = await model.create({ email: 'keep-me@example.com' });
 
-      expect(await model.delete(toDelete.id)).to.equal(1);
-      expect(await model.get({ id: toDelete.id })).to.deep.equal([]);
-      expect(await model.get({ id: toKeep.id })).to.deep.equal([toKeep]);
+      expect(await model.delete(toDelete.id)).toBe(1);
+      expect(await model.get({ id: toDelete.id })).toEqual([]);
+      expect(await model.get({ id: toKeep.id })).toEqual([toKeep]);
     });
 
     it('returns 0 when deleting an id that does not exist', async () => {
       const model = await createModel({ knex, knexConfig: dbConfig, tableName, logger });
       instances.push(model.knex);
 
-      expect(await model.delete(2147483647)).to.equal(0);
+      expect(await model.delete(2147483647)).toBe(0);
     });
 
     it('logs and rethrows DB errors on delete and remains usable', async () => {
@@ -520,14 +597,14 @@ describe('createModel with a real knex connection', () => {
       // A non-numeric string passes input validation but is rejected by the integer id column.
       const error = await rejectionOf(model.delete('not-a-number'));
 
-      expect(error.message).to.match(/invalid input syntax for type integer/);
-      expect(logger.error).to.have.been.calledOnceWith('DB delete error');
+      expect(error.message).toMatch(/invalid input syntax for type integer/);
+      expectFirstCallStartsWith(logger.error, 'DB delete error');
       // 22P02 is PostgreSQL's invalid_text_representation; error.message quotes the id, so only the code is logged.
-      expect(logger.error.firstCall.args[1]).to.deep.equal({ table: tableName, code: '22P02' });
-      expect(JSON.stringify(logger.error.firstCall.args)).to.not.include('not-a-number');
+      expect(logger.error.mock.calls[0][1]).toEqual({ table: tableName, code: '22P02' });
+      expect(JSON.stringify(logger.error.mock.calls[0])).not.toContain('not-a-number');
 
       const [created] = await model.create({ email: 'after-error@example.com' });
-      expect(await model.delete(created.id)).to.equal(1);
+      expect(await model.delete(created.id)).toBe(1);
     });
 
     it('logs a failure when the table does not exist', async () => {
@@ -538,8 +615,8 @@ describe('createModel with a real knex connection', () => {
         knex: instance, knexConfig: dbConfig, tableName: 'hof_rds_lib_missing_table', logger
       }));
 
-      expect(error.message).to.match(/does not exist/);
-      expect(logger.warn).to.have.been.calledOnceWith('DB connection failed');
+      expect(error.message).toMatch(/does not exist/);
+      expectFirstCallStartsWith(logger.warn, 'DB connection failed');
     });
   });
 });
